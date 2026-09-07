@@ -1,7 +1,7 @@
 ﻿# CMakeList.txt : Top-level CMake project file, do global configuration
 # and include sub-projects here.
 #
-cmake_minimum_required (VERSION 3.10)
+cmake_minimum_required (VERSION 3.20)
 
 # Enable Hot Reload for MSVC compilers if supported.
 if (POLICY CMP0141)
@@ -12,4 +12,9 @@ endif()
 project ("CMakeProject1")
 
 # Include sub-projects.
+
+find_package(OpenCV REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(Ceres REQUIRED)
+
 add_subdirectory ("CMakeProject1")

@@ -10,3 +10,13 @@ if (CMAKE_VERSION VERSION_GREATER 3.12)
 endif()
 
 # TODO: Add tests and install targets if needed.
+target_include_directories(${PROJECT_NAME} PRIVATE
+    ${OpenCV_INCLUDE_DIRS}
+    ${CERES_INCLUDE_DIRS}
+)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    ${OpenCV_LIBS}
+    Eigen3::Eigen
+    Ceres::ceres
+)
