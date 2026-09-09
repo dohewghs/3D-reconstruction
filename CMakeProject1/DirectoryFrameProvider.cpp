@@ -5,7 +5,7 @@
 DirectoryFrameProvider::DirectoryFrameProvider(const std::string& _dirPath) : IFrameProvider()
 {
 	if (!fs::exists(_dirPath) || !fs::is_directory(_dirPath)) {
-		std::cerr << "Помилка: директорія не існує: " << _dirPath << std::endl;
+		std::cerr << "Error: Directory isn't exist: " << _dirPath << std::endl;
 		return;
 	}
 
@@ -15,7 +15,7 @@ DirectoryFrameProvider::DirectoryFrameProvider(const std::string& _dirPath) : IF
 		{
 			std::string ext = entry.path().extension().string();
 
-			std::transform(ext.begin(), ext.end(), ext.begin(), std::tolower);
+			std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {return std::tolower(c); });
 
 			if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp")
 			{
