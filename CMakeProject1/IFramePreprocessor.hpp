@@ -3,6 +3,7 @@
 
 class IFramePreprocessor
 {
+public:
 	virtual ~IFramePreprocessor() = default;
 
 	virtual bool process(const cv::Mat& rawFrame, cv::Mat& outFrame) = 0;
