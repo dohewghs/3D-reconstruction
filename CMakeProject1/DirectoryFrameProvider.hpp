@@ -18,9 +18,9 @@ public:
 	explicit DirectoryFrameProvider(const std::string& dirPath);
 	~DirectoryFrameProvider() = default;
 
-	virtual bool getNextFrame(cv::Mat& outFrame);
-	virtual bool hasNextFrame() const;
-	virtual void reset();
+	virtual bool getNextFrame(cv::Mat& outFrame) override;
+	virtual bool hasNextFrame() const override;
+	virtual void reset() override;
 
 	size_t totalFrames();
 };
