@@ -15,6 +15,11 @@ struct CameraPose
 {
 	cv::Mat rotation;
 	cv::Mat translation;
+
+	CameraPose(const cv::Mat rot = cv::Mat(), const cv::Mat trans = cv::Mat())
+        : rotation(std::move(rot)), translation(std::move(trans))
+    {
+    }
 };
 
 struct MapPoint3D {
@@ -46,4 +51,13 @@ struct TwoViewReconstructionResult {
     std::vector<cv::Point2f> inliersPrev;
     std::vector<cv::Point2f> inliersCurr;
     cv::Mat inlierMask;
+};
+
+struct PnpTrackingResult {
+	bool success = false;
+	cv::Mat rotation; // Rotation matrix (3x3) world
+	cv::Mat translation; // Translation vector (3x1) world
+	int inliersCount = 0;
+
+	std::vector<int> inlierPoints3D; // indices of inlier 3D points in the provided list
 };

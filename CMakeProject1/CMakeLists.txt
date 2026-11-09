@@ -20,6 +20,7 @@ add_executable (CMakeProject1
  "TwoViewGeometryEstimator.cpp"
  "PlyExporter.hpp"
  "GlobalMap.hpp"
+ "PnpTracker.hpp"
 )
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
