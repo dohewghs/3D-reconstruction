@@ -13,16 +13,16 @@ struct Frame
 
 struct CameraPose
 {
-	Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
-	Eigen::Vector3d t = Eigen::Vector3d::Zero();
+	cv::Mat rotation;
+	cv::Mat translation;
 };
 
-struct LandMark3D
-{
-	int id;
-	Eigen::Vector3d position;
-	// Список спостережень: pair<frame_id, keypoint_idx> для Bundle Adjustment
-	std::vector<std::pair<int, int>> observations;
+struct MapPoint3D {
+    int id = -1;
+    cv::Point3d position;
+    cv::Mat descriptor; // Дескриптор, який описує точку
+
+    std::unordered_map<int, int> observations; // <frame_id, keypoint_idx>
 };
 
 struct TwoViewReconstructionResult {
