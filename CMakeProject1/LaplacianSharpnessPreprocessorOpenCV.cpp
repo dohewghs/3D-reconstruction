@@ -1,4 +1,5 @@
 #include "LaplacianSharpnessPreprocessorOpenCV.hpp"
+#include <iostream>
 
 LaplacianFramePreprocessorOpenCV::LaplacianFramePreprocessorOpenCV(double _blurThreshold) : blurThreshold(_blurThreshold)
 {
@@ -39,7 +40,11 @@ double LaplacianFramePreprocessorOpenCV::calculateVarianceOfLaplacian(const cv::
 	cv::Scalar mean, stddev;
 	cv::meanStdDev(laplacian, mean, stddev);
 	
-	return stddev[0] * stddev[0];
+	double variance = stddev[0] * stddev[0];
+
+	std::cout << "[DEBUG] Variance: " << variance << " | StdDev: " << stddev.val[0] << std::endl;
+
+	return variance;
 }
 
 void LaplacianFramePreprocessorOpenCV::setThreshold(double threshold)

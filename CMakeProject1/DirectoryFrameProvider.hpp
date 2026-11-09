@@ -8,6 +8,7 @@
 
 namespace fs = std::filesystem;
 
+
 class DirectoryFrameProvider : public IFrameProvider
 {
 private:
