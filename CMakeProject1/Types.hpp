@@ -23,6 +23,19 @@ struct MapPoint3D {
     cv::Mat descriptor; // Дескриптор, який описує точку
 
     std::unordered_map<int, int> observations; // <frame_id, keypoint_idx>
+
+	bool isObservedIn(int frameId) const {
+		return observations.find(frameId) != observations.end();
+	}
+
+	int getKeypointIndex(int frameId) const {
+		auto it = observations.find(frameId);
+
+		if (it != observations.end()) 
+			return it->second;
+		
+		return -1; // Якщо кадр не спостерігає точку
+	}
 };
 
 struct TwoViewReconstructionResult {
