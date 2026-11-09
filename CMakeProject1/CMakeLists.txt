@@ -15,6 +15,7 @@ add_executable (CMakeProject1
  "AkazeFeatureExtractor.cpp"
  "IFeatureMatcher.hpp"
  "HammingRationMatcher.hpp"
+ "ITwoViewGeometryEstimator.hpp"
  "TwoViewGeometryEstimator.hpp"
  "TwoViewGeometryEstimator.cpp"
  "PlyExporter.hpp"
