@@ -1,0 +1,155 @@
+#pragma once
+
+#include <vector>
+#include <cmath>
+#include <opencv2/core.hpp>
+#include <opencv2/calib3d.hpp>
+
+#include "GlobalMap.hpp"
+#include "Types.hpp"
+
+class IncrementalTriangulator {
+private:
+    cv::Mat cameraMatrix;
+    double minTriangulationAngleRad;
+    double minDepth;
+    double maxDepth;
+
+    double calculateRayAngle(const cv::Point3d& point3D,
+                            const cv::Mat& C1,
+                            const cv::Mat& C2) const
+    {
+        cv::Point3d ray1(point3D.x - C1.at<double>(0),
+                        point3D.y - C1.at<double>(1),
+                        point3D.z - C1.at<double>(2));
+
+        cv::Point3d ray2(point3D.x - C2.at<double>(0),
+                         point3D.y - C2.at<double>(1),
+                         point3D.z - C2.at<double>(2));
+
+        double norm1 = std::sqrt(ray1.x * ray1.x + ray1.y * ray1.y + ray1.z * ray1.z);
+        double norm2 = std::sqrt(ray2.x * ray2.x + ray2.y * ray2.y + ray2.z * ray2.z);
+
+        if (norm1 < 1e-6 || norm2 < 1e-6) return 0.0;
+
+        double dot = (ray1.x * ray2.x + ray1.y * ray2.y + ray1.z * ray2.z) / (norm1 * norm2);
+        dot = std::max(-1.0, std::min(1.0, dot));
+
+        return std::acos(dot);
+    }
+
+public:
+    explicit IncrementalTriangulator(
+        const cv::Mat& cameraMatrix,
+        double minTriangulationAngleDeg = 2.0,
+        double minDepth = 0.1,
+        double maxDepth = 50.0)
+        : minDepth(minDepth), maxDepth(maxDepth), minTriangulationAngleRad(minTriangulationAngleDeg * CV_PI / 180.0)
+    {
+        cameraMatrix.convertTo(this->cameraMatrix, CV_64F);
+    }
+
+    int triangulateNewPoints(
+        const Frame& previousFrame,
+        const Frame& currentFrame,
+        const std::vector<cv::DMatch>& matches,
+        GlobalMap& map) const
+    {
+        if (!map.hasCameraPose(previousFrame.id) || !map.hasCameraPose(currentFrame.id)) {
+            std::cerr << "[Triangulator] Помилка: пози для кадру " << previousFrame.id 
+                      << " або " << currentFrame.id << " відсутні в карті!" << std::endl;
+            return 0;
+        }
+        
+        const auto& posePrevious = map.getCameraPose(previousFrame.id);
+        const auto& poseCurrent = map.getCameraPose(currentFrame.id);
+
+        // 1. Побудова матриць проєкції: P = K * [R | t]
+
+        cv::Mat RtPrevious = cv::Mat::zeros(3, 4, CV_64F);
+        posePrevious.rotation.copyTo(RtPrevious(cv::Rect(0,0,3,3)));
+        posePrevious.translation.copyTo(RtPrevious(cv::Rect(3,0,1,3)));
+        cv::Mat P_preious = this->cameraMatrix * RtPrevious;
+
+        cv::Mat RtCurrent = cv::Mat::zeros(3, 4, CV_64F);
+        posePrevious.rotation.copyTo(RtCurrent(cv::Rect(0,0,3,3)));
+        posePrevious.translation.copyTo(RtCurrent(cv::Rect(3,0,1,3)));
+        cv::Mat P_current = this->cameraMatrix * RtCurrent;
+
+        // Оптичні центри камер у світових координатах: C = -R^T * t
+        cv::Mat C_previous = -posePrevious.rotation.t() * posePrevious.translation;
+        cv::Mat C_current = -poseCurrent.rotation.t() * poseCurrent.translation;
+
+        // 2. Фільтрація: беремо тільки ті збіги, які ще НЕ існують у карті
+        std::vector<cv::Point2f> pointsPrevious, pointsCurrent;
+        std::vector<int> keypointIdxPrevious, keypointsIdxCurrent;
+
+        pointsPrevious.reserve(matches.size());
+        pointsCurrent.reserve(matches.size());
+
+        keypointIdxPrevious.reserve(matches.size());
+        keypointsIdxCurrent.reserve(matches.size());
+
+        for (const auto& m : matches)
+        {
+            int kpIdx1 = m.queryIdx;
+            int kpIdx2 = m.trainIdx;
+
+            if (map.getPointIdForFrameKeypoint(previousFrame.id, kpIdx1) != -1 ||
+                map.getPointIdForFrameKeypoint(currentFrame.id, kpIdx2) != -1)
+                continue;
+            
+            pointsPrevious.push_back(previousFrame.keypoints[kpIdx1].pt);
+            pointsCurrent.push_back(currentFrame.keypoints[kpIdx2].pt);
+            keypointIdxPrevious.push_back(kpIdx1);
+            keypointsIdxCurrent.push_back(kpIdx2);
+        }
+
+        if (pointsPrevious.empty()) 
+            return 0;
+
+        // 3. Лінійна тріангуляція точок у 4D однорідних координатах
+        cv::Mat points4D;
+        cv::triangulatePoints(P_preious, P_current, pointsPrevious, pointsCurrent, points4D);
+
+        int addedCount = 0;
+
+        // 4. Валідація та додавання до GlobalMap
+        for(int i=0; i < points4D.cols; ++i) {
+            double w = points4D.at<double>(3, i);
+            if (std::abs(w) < 1e-6) 
+                continue;
+
+            cv::Point3d ptWorld(
+                points4D.at<double>(0, i) / w,
+                points4D.at<double>(1, i) / w,
+                points4D.at<double>(2, i) / w
+            );
+
+            // Перевіряємо глибину відносно першої камери: Z_cam = R_row2 * X_world + t_z
+            double z1 = posePrevious.rotation.row(2).dot(cv::Mat(ptWorld).t()) + posePrevious.translation.at<double>(2);
+            double z2 = poseCurrent.rotation.row(2).dot(cv::Mat(ptWorld).t()) + poseCurrent.translation.at<double>(2);
+
+            if (z1 <= minDepth || z1 >= maxDepth || z2 <= minDepth || z2 >= maxDepth) 
+                continue;
+
+            double angle = calculateRayAngle(ptWorld, C_previous, C_current);
+            
+            if (angle < this->minTriangulationAngleRad)
+                continue;
+            
+            int kpIdx1 = keypointIdxPrevious[i];
+            int kpIdx2 = keypointsIdxCurrent[i];
+
+            cv::Mat descriptors = previousFrame.descriptors.row(kpIdx1).clone();
+
+            map.addPoint3D(ptWorld, descriptors, previousFrame.id, kpIdx1, currentFrame.id, kpIdx2);
+            addedCount++;
+        }
+
+        std::cout << "[Triangulator] Дотріангульовано нових точок: " << addedCount 
+                  << " (кандидатів було: " << pointsPrevious.size() << ")" << std::endl;
+
+        return addedCount;
+    }
+};
