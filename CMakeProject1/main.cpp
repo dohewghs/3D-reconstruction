@@ -10,9 +10,12 @@
 
 cv::Mat createDefaultCameraMatrix(double width, double height) {
     double focalLength = 1.2 * std::max(width, height);
+
+    double f = (24.0 * std::max(width, height)) / 36.0;
+
     return (cv::Mat_<double>(3, 3) <<
-        focalLength, 0.0,         width / 2.0,
-        0.0,         focalLength, height / 2.0,
+        f, 0.0,         width / 2.0,
+        0.0,         f, height / 2.0,
         0.0,         0.0,         1.0);
 }
 
@@ -26,7 +29,7 @@ int main(int argc, char** argv) {
     std::cout << "Ініціалізація 3D Reconstruction Pipeline..." << std::endl;
     std::cout << "Шлях до датасету: " << directoryPath << std::endl;
 
-    cv::Mat K = createDefaultCameraMatrix(1920.0, 1080.0);
+    cv::Mat K = createDefaultCameraMatrix(2268.0, 4032.0);
 
     // 1. Створення обробників
     auto provider = std::make_unique<DirectoryFrameProvider>(directoryPath);
