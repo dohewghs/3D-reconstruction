@@ -22,6 +22,8 @@ add_executable (CMakeProject1
  "GlobalMap.hpp"
  "PnpTracker.hpp"
  "IncrementalTriangulator.hpp"
+ "ReprojectionErrorCost.hpp"
+ "BundleAdjuster.hpp"
 )
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
