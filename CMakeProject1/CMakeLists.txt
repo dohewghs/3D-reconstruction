@@ -24,6 +24,7 @@ add_executable (CMakeProject1
  "IncrementalTriangulator.hpp"
  "ReprojectionErrorCost.hpp"
  "BundleAdjuster.hpp"
+ "SfMPipeline.hpp"
 )
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)

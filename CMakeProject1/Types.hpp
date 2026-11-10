@@ -16,7 +16,7 @@ struct CameraPose
 	cv::Mat rotation;
 	cv::Mat translation;
 
-	CameraPose(const cv::Mat rot = cv::Mat(), const cv::Mat trans = cv::Mat())
+	CameraPose(cv::Mat rot, cv::Mat trans)
         : rotation(std::move(rot)), translation(std::move(trans))
     {
     }
