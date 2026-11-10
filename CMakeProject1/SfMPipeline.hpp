@@ -5,6 +5,9 @@
 #include <opencv2/core/mat.hpp>
 #include <unordered_map>
 #include <string>
+#include <vector>
+#include <algorithm>
+#include <cmath>
 #include <opencv2/core.hpp>
 
 #include "Types.hpp"
@@ -19,6 +22,7 @@
 #include "BundleAdjuster.hpp"
 #include "PlyExporter.hpp"
 #include "DenseReconstructor.hpp"
+#include "PointCloudFilter.hpp"
 
 class SfMPipeline{
 private:
@@ -44,11 +48,60 @@ private:
             outRawColor = raw;
             outFrame.id = frameId;
             outFrame.imageGray = gray;
+            outFrame.imageColor = raw;
             m_extractor->extract(outFrame);
             return true;
         }
 
         return false;
+    }
+
+    struct DepthRange {
+        double minDepth;
+        double medianDepth;
+        double maxDepth;
+    };
+
+    /**
+     * Діапазон глибин сцени для кожного кадру за розрідженою хмарою (після BA).
+     * Масштаб монокулярної реконструкції довільний (базис першої пари = 1), тому
+     * захардкоджені "2..35 метрів" не мають сенсу — беремо перцентилі реальних глибин.
+     */
+    std::unordered_map<int, DepthRange> computeFrameDepthRanges(size_t minPoints = 20) const {
+        std::unordered_map<int, std::vector<double>> depthsPerFrame;
+
+        for (const auto& [pointId, mapPt] : m_map.getMapPoints()) {
+            for (const auto& [frameId, kpIdx] : mapPt.observations) {
+                if (!m_map.hasCameraPose(frameId)) continue;
+
+                const CameraPose& pose = m_map.getCameraPose(frameId);
+                cv::Matx33d R = cv::Mat(pose.rotation);
+                cv::Vec3d t = cv::Mat(pose.translation);
+                cv::Vec3d Xc = R * cv::Vec3d(mapPt.position.x, mapPt.position.y, mapPt.position.z) + t;
+
+                if (std::isfinite(Xc[2]) && Xc[2] > 0.0) {
+                    depthsPerFrame[frameId].push_back(Xc[2]);
+                }
+            }
+        }
+
+        std::unordered_map<int, DepthRange> ranges;
+        for (auto& [frameId, depths] : depthsPerFrame) {
+            if (depths.size() < minPoints) continue;
+
+            std::sort(depths.begin(), depths.end());
+            auto percentile = [&](double q) {
+                return depths[static_cast<size_t>(q * (depths.size() - 1))];
+            };
+
+            // Запас: фасад може виходити за межі розріджених точок
+            ranges[frameId] = DepthRange{
+                percentile(0.05) * 0.7,
+                percentile(0.50),
+                percentile(0.95) * 1.5
+            };
+        }
+        return ranges;
     }
 
 public:
@@ -165,47 +218,66 @@ public:
         std::cout << "[Пайплайн] Експорт оптимізованої хмари точок у: " << outputPlyPath << std::endl;
         PlyExporter::save(outputPlyPath, m_map.getAllMapPoints());
 
-        // 2. Запуск Dense Stereo Reconstruction для сусідніх пар кадрів
+        // Етап 5: Dense Stereo Reconstruction
         std::cout << "\n==========================================" << std::endl;
         std::cout << "[Пайплайн] Генерація щільної хмари точок (Dense MVS)..." << std::endl;
 
+        std::vector<int> registeredIds;
+        for (const auto& [frameId, frame] : m_processedFrames) {
+            if (m_map.hasCameraPose(frameId)) registeredIds.push_back(frameId);
+        }
+        std::sort(registeredIds.begin(), registeredIds.end());
+
+        auto depthRanges = computeFrameDepthRanges();
+
         DenseReconstructor denseEngine(m_K);
         std::vector<DensePoint3D> totalDenseCloud;
+        std::vector<double> medianDepths;
+        const size_t maxLookahead = 30;
+        int pairCount = 0;
 
-        // Проходимо по всіх успішно зареєстрованих сусідніх парах (наприклад, 0-1, 1-2 тощо)
-        for (size_t i = 0; i + 1 < m_processedFrames.size(); ++i) {
-            int id1 = static_cast<int>(i);
-            int id2 = static_cast<int>(i + 1);
+        for (size_t a = 0; a < registeredIds.size(); ++a) {
+            int refId = registeredIds[a];
+            auto rangeIt = depthRanges.find(refId);
+            if (rangeIt == depthRanges.end()) continue;
+            const DepthRange& range = rangeIt->second;
 
-            if (!m_map.hasCameraPose(id1) || !m_map.hasCameraPose(id2)) continue;
+            // Кандидати — наступні зареєстровані кадри (не лише сусідній: у нього замалий базис)
+            std::vector<int> candidates(
+                registeredIds.begin() + a + 1,
+                registeredIds.begin() + std::min(registeredIds.size(), a + 1 + maxLookahead));
 
-            const auto& f1 = m_processedFrames.at(id1);
-            const auto& f2 = m_processedFrames.at(id2);
-
-            // Якщо ви зберігаєте кольорові зображення у структуру Frame, беремо звідти,
-            // або зчитуємо напряму/з кешу:
-            cv::Mat color1 = this->m_processedFrames[id1].imageGray; // або зчитайте f1 у BGR
-            cv::Mat color2 = this->m_processedFrames[id2].imageGray;
+            int partnerId = denseEngine.selectStereoPartner(
+                refId, candidates, m_map, range.medianDepth);
+            if (partnerId < 0) continue;
 
             auto pairPoints = denseEngine.reconstructDensePair(
-                f1, f2, color1,
-                m_map.getCameraPose(id1),
-                m_map.getCameraPose(id2)
+                m_processedFrames.at(refId), m_processedFrames.at(partnerId),
+                m_map.getCameraPose(refId), m_map.getCameraPose(partnerId),
+                range.minDepth, range.maxDepth,
+                pairCount
             );
+            if (pairPoints.empty()) continue;
 
-            if (pairPoints.empty())
-            {
-                pairPoints = denseEngine.reconstructDensePair(
-                f2, f1, color2,
-                m_map.getCameraPose(id2),
-                m_map.getCameraPose(id1)
-                );
-            }
-
+            pairCount++;
+            medianDepths.push_back(range.medianDepth);
             totalDenseCloud.insert(totalDenseCloud.end(), pairPoints.begin(), pairPoints.end());
         }
 
-        PlyExporter::saveColored("final_dense_cloud.ply", totalDenseCloud);
+        if (totalDenseCloud.empty()) {
+            std::cerr << "[Dense MVS] Не вдалося побудувати жодної стерео-пари." << std::endl;
+        } else {
+            PlyExporter::saveColored("final_dense_cloud_raw.ply", totalDenseCloud);
+
+            // Розмір вокселя ~ 2 пікселі на типовій глибині сцени
+            std::nth_element(medianDepths.begin(), medianDepths.begin() + medianDepths.size() / 2, medianDepths.end());
+            double sceneDepth = medianDepths[medianDepths.size() / 2];
+            double voxelSize = 2.0 * sceneDepth / m_K.at<double>(0, 0);
+            int minSources = (pairCount >= 2) ? 2 : 1;
+
+            auto fusedCloud = PointCloudFilter::voxelFuse(totalDenseCloud, voxelSize, minSources);
+            PlyExporter::saveColored("final_dense_cloud.ply", fusedCloud);
+        }
 
         std::cout << "[Пайплайн] Роботу успішно завершено!" << std::endl;
         return true;

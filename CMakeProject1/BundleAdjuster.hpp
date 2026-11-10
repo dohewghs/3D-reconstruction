@@ -106,7 +106,11 @@ public:
 
         // 3. Усунення невизначеності калібрувальної системи (Gauge Freedom):
         if (fixFirstCamera && !cameraParams.empty()) {
-            int anchorFrameId = map.getCameraPoses().begin()->first;
+            // unordered_map не має порядку, тому begin() — випадкова камера. Фіксуємо саме найперший кадр (R=I, t=0).
+            int anchorFrameId = cameraParams.begin()->first;
+            for (const auto& entry : cameraParams) {
+                anchorFrameId = std::min(anchorFrameId, entry.first);
+            }
             problem.SetParameterBlockConstant(cameraParams[anchorFrameId].data());
             problem.SetParameterBlockConstant(cameraParams[anchorFrameId].data() + 3);
         }

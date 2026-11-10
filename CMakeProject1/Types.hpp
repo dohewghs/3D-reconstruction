@@ -7,6 +7,7 @@ struct Frame
 {
 	int id;
 	cv::Mat imageGray;
+	cv::Mat imageColor; // Оригінальний BGR кадр (потрібен для кольору щільної хмари)
 	std::vector<cv::KeyPoint> keypoints;
 	cv::Mat descriptors;
 };
@@ -66,4 +67,5 @@ struct PnpTrackingResult {
 struct DensePoint3D {
     cv::Point3d position;
     cv::Vec3b color; // B, G, R
+    int sourceId = -1; // Індекс стерео-пари, з якої отримано точку (для перевірки узгодженості між парами)
 };

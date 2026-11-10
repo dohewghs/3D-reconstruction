@@ -86,7 +86,7 @@ public:
     /// @brief Збереження щільної хмари з RGB-кольорами
     static bool saveColored(const std::string& filename, 
                             const std::vector<DensePoint3D>& points,
-                            double maxCoord = 100.0) 
+                            double maxCoord = 1e6) // масштаб монокулярного SfM довільний, тому 100 обрізало фасад
     {
         std::ofstream ofs(filename);
         if (!ofs.is_open()) return false;

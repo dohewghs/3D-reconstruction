@@ -26,6 +26,7 @@ add_executable (CMakeProject1
  "BundleAdjuster.hpp"
  "SfMPipeline.hpp"
  "DenseReconstructor.hpp"
+ "PointCloudFilter.hpp"
 )
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
