@@ -18,6 +18,7 @@
 #include "IncrementalTriangulator.hpp"
 #include "BundleAdjuster.hpp"
 #include "PlyExporter.hpp"
+#include "DenseReconstructor.hpp"
 
 class SfMPipeline{
 private:
@@ -163,6 +164,48 @@ public:
 
         std::cout << "[Пайплайн] Експорт оптимізованої хмари точок у: " << outputPlyPath << std::endl;
         PlyExporter::save(outputPlyPath, m_map.getAllMapPoints());
+
+        // 2. Запуск Dense Stereo Reconstruction для сусідніх пар кадрів
+        std::cout << "\n==========================================" << std::endl;
+        std::cout << "[Пайплайн] Генерація щільної хмари точок (Dense MVS)..." << std::endl;
+
+        DenseReconstructor denseEngine(m_K);
+        std::vector<DensePoint3D> totalDenseCloud;
+
+        // Проходимо по всіх успішно зареєстрованих сусідніх парах (наприклад, 0-1, 1-2 тощо)
+        for (size_t i = 0; i + 1 < m_processedFrames.size(); ++i) {
+            int id1 = static_cast<int>(i);
+            int id2 = static_cast<int>(i + 1);
+
+            if (!m_map.hasCameraPose(id1) || !m_map.hasCameraPose(id2)) continue;
+
+            const auto& f1 = m_processedFrames.at(id1);
+            const auto& f2 = m_processedFrames.at(id2);
+
+            // Якщо ви зберігаєте кольорові зображення у структуру Frame, беремо звідти,
+            // або зчитуємо напряму/з кешу:
+            cv::Mat color1 = this->m_processedFrames[id1].imageGray; // або зчитайте f1 у BGR
+            cv::Mat color2 = this->m_processedFrames[id2].imageGray;
+
+            auto pairPoints = denseEngine.reconstructDensePair(
+                f1, f2, color1,
+                m_map.getCameraPose(id1),
+                m_map.getCameraPose(id2)
+            );
+
+            if (pairPoints.empty())
+            {
+                pairPoints = denseEngine.reconstructDensePair(
+                f2, f1, color2,
+                m_map.getCameraPose(id2),
+                m_map.getCameraPose(id1)
+                );
+            }
+
+            totalDenseCloud.insert(totalDenseCloud.end(), pairPoints.begin(), pairPoints.end());
+        }
+
+        PlyExporter::saveColored("final_dense_cloud.ply", totalDenseCloud);
 
         std::cout << "[Пайплайн] Роботу успішно завершено!" << std::endl;
         return true;

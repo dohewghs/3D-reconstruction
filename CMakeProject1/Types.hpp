@@ -62,3 +62,8 @@ struct PnpTrackingResult {
 
 	std::vector<int> inlierPoints3D; // indices of inlier 3D points in the provided list
 };
+
+struct DensePoint3D {
+    cv::Point3d position;
+    cv::Vec3b color; // B, G, R
+};

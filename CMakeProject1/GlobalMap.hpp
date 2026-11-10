@@ -139,5 +139,14 @@ public:
     const std::unordered_map<int, MapPoint3D>& getMapPoints() const {
         return mapPoints;
     }
+
+    std::vector<cv::Point3d> getAllPointPositions() const {
+        std::vector<cv::Point3d> positions;
+        positions.reserve(mapPoints.size());
+        for (const auto& entry : mapPoints) {
+            positions.push_back(entry.second.position);
+        }
+        return positions;
+    }
     #pragma endregion
 };

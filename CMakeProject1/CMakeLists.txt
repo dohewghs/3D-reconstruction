@@ -25,6 +25,7 @@ add_executable (CMakeProject1
  "ReprojectionErrorCost.hpp"
  "BundleAdjuster.hpp"
  "SfMPipeline.hpp"
+ "DenseReconstructor.hpp"
 )
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
