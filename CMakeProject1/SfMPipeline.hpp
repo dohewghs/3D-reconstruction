@@ -109,25 +109,13 @@ public:
         m_map.addCameraPose(frame1.id, CameraPose(initResult.R, initResult.t));
 
         // Заповнюємо карту початковими тріангульованими 3D-точками
-        int addedInit = 0;
-        for (size_t i = 0; i<initialMatches.size(); ++i)
-        {
-            if (initResult.inlierMask.at<uchar>(i)) {
-                int kpIdx0 = initialMatches[i].queryIdx;
-                int kpIdx1 = initialMatches[i].trainIdx;
+        for (size_t i = 0; i < initResult.points3D.size(); ++i) {
+            int matchIdx = initResult.inlierMatchIndices[i];
+            int kpIdx0 = initialMatches[matchIdx].queryIdx;
+            int kpIdx1 = initialMatches[matchIdx].trainIdx;
 
-                if (addedInit < static_cast<int>(initResult.points3D.size())) {
-                    cv::Mat desc = frame0.descriptors.row(kpIdx0).clone();
-                    
-                    m_map.addPoint3D(initResult.points3D[addedInit++], 
-                        desc, 
-                        frame0.id, 
-                        kpIdx0, 
-                        frame1.id, 
-                        kpIdx1
-                    );
-                }
-            }
+            cv::Mat desc = frame0.descriptors.row(kpIdx0).clone();
+            m_map.addPoint3D(initResult.points3D[i], desc, frame0.id, kpIdx0, frame1.id, kpIdx1);
         }
 
         std::cout << "[Пайплайн] Ініціалізація завершена! В карті: " << m_map.getMapPointCount() << " точок." << std::endl;

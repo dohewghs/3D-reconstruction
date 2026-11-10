@@ -9,7 +9,7 @@ private:
     cv::Ptr<cv::DescriptorMatcher> matcher;
 
 public:
-    HammingRatioMatcher(float ratioThreshold = 0.75f)
+    HammingRatioMatcher(float ratioThreshold = 0.85f)
         : ratioThreshold(ratioThreshold)
     {
             this->matcher = cv::DescriptorMatcher::create(cv::DescriptorMatcher::BRUTEFORCE_HAMMING);

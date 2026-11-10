@@ -16,7 +16,7 @@ struct CameraPose
 	cv::Mat rotation;
 	cv::Mat translation;
 
-	CameraPose(cv::Mat rot, cv::Mat trans)
+	CameraPose(cv::Mat rot = cv::Mat(), cv::Mat trans = cv::Mat())
         : rotation(std::move(rot)), translation(std::move(trans))
     {
     }
@@ -51,6 +51,7 @@ struct TwoViewReconstructionResult {
     std::vector<cv::Point2f> inliersPrev;
     std::vector<cv::Point2f> inliersCurr;
     cv::Mat inlierMask;
+	std::vector<int> inlierMatchIndices;
 };
 
 struct PnpTrackingResult {

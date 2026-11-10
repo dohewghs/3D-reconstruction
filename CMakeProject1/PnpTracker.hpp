@@ -19,8 +19,8 @@ private:
 public:
     explicit PnpTracker(const cv::Mat& cameraMatrix, 
                         const cv::Mat& distCoeffs = cv::Mat(),
-                        int minInliersForValidPose = 10,
-                        double reprojectionErrorThreshold = 4.0,
+                        int minInliersForValidPose = 6,
+                        double reprojectionErrorThreshold = 7.0,
                         double confidence = 0.99,
                         int maxIterations = 200) :
         minInliersForValidPose(minInliersForValidPose),
@@ -57,7 +57,7 @@ public:
 
         bool pnpSuccess = cv::solvePnPRansac(points3D, points2D, cameraMatrix, distCoeffs,
                                              rvec, tvec, false, maxIterations,
-                                             reprojectionErrorThreshold, confidence, inliers, cv::SOLVEPNP_EPNP);
+                                             reprojectionErrorThreshold, confidence, inliers, cv::SOLVEPNP_SQPNP);
         
         if (!pnpSuccess || inliers.size() < this->minInliersForValidPose) {
             result.success = false;
@@ -90,6 +90,7 @@ public:
         std::vector<cv::Point3f> objectPoints3D;
         std::vector<cv::Point2f> imagePoints2D;
         std::vector<int> mapPointsIds;
+        std::vector<int> currentKpIndices;
 
         map.find2D3DCorrespondences(
             refFrameId,
@@ -97,7 +98,8 @@ public:
             matches,
             objectPoints3D,
             imagePoints2D,
-            mapPointsIds
+            mapPointsIds,
+            currentKpIndices
         );
 
         std::cout << "[PnP] Знайдено 2D-3D кандидатів між кадром #" << refFrameId 
@@ -119,21 +121,12 @@ public:
                   << " / " << objectPoints3D.size() << std::endl;
         
         map.addCameraPose(currentFrame.id, CameraPose(pnpResult.rotation, pnpResult.translation));
-        
+
         for (int idx : pnpResult.inlierPoints3D)
         {
             int pointId = mapPointsIds[idx];
-
-            // Знаходимо, якому саме keypoint поточного кадру належала ця точка
-            // (trainIdx у матчах відповідає поточному кадру)
-
-            for (const auto& m : matches)
-            {
-                if (currentFrame.keypoints[m.trainIdx].pt == imagePoints2D[idx]) {
-                    map.addObservation(pointId, currentFrame.id, m.trainIdx);
-                    break;
-                }
-            }
+            int kpIdx = currentKpIndices[idx]; // Точний індекс одразу за O(1)
+            map.addObservation(pointId, currentFrame.id, kpIdx);
         }
 
         return true;

@@ -4,28 +4,59 @@
 #include <vector>
 #include <fstream>
 #include <iostream>
+#include <cmath>
+#include <concepts>
 #include <opencv2/core.hpp>
 
 #include "Types.hpp"
 
 class PlyExporter {
-public:
-    static bool save(const std::string& filename, const std::vector<cv::Point3d>& points) {
+private:
+    // Перевірка на валідність та граничні межі координат
+    static inline bool isValidPoint(const cv::Point3d& pt, double maxCoord = 100.0) {
+        if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) {
+            return false;
+        }
+        return (std::abs(pt.x) <= maxCoord && 
+                std::abs(pt.y) <= maxCoord && 
+                std::abs(pt.z) <= maxCoord);
+    }
+
+    // Універсальний внутрішній метод збереження
+    template <typename T, typename Extractor>
+    static bool saveInternal(const std::string& filename, 
+                             const std::vector<T>& items, 
+                             Extractor extractPos, 
+                             double maxCoord) 
+    {
         std::ofstream ofs(filename);
         if (!ofs.is_open()) {
-            std::cerr << "Не вдалося відкрити файл для запису: " << filename << std::endl;
+            std::cerr << "[PlyExporter] Не вдалося відкрити файл для запису: " << filename << "\n";
             return false;
         }
 
+        // Попередній відбір валідних точок для точного лічильника в заголовку
+        std::vector<cv::Point3d> filtered;
+        filtered.reserve(items.size());
+
+        for (const auto& item : items) {
+            cv::Point3d pt = extractPos(item);
+            if (isValidPoint(pt, maxCoord)) {
+                filtered.push_back(pt);
+            }
+        }
+
+        // Запис PLY ASCII заголовка
         ofs << "ply\n";
         ofs << "format ascii 1.0\n";
-        ofs << "element vertex " << points.size() << "\n";
+        ofs << "element vertex " << filtered.size() << "\n";
         ofs << "property float x\n";
         ofs << "property float y\n";
         ofs << "property float z\n";
         ofs << "end_header\n";
 
-        for (const auto& pt : points) {
+        // Запис геометрії
+        for (const auto& pt : filtered) {
             ofs << pt.x << " " << pt.y << " " << pt.z << "\n";
         }
 
@@ -33,23 +64,22 @@ public:
         return true;
     }
 
-    static bool save(const std::string& filename, const std::vector<MapPoint3D>& points) {
-        std::ofstream ofs(filename);
-        if (!ofs.is_open()) return false;
+public:
+    /// @brief Збереження хмари cv::Point3d
+    /// @param maxCoord Порогове значення для фільтрації триангуляційних викидів (|x|, |y|, |z| <= maxCoord)
+    static bool save(const std::string& filename, 
+                     const std::vector<cv::Point3d>& points, 
+                     double maxCoord = 100.0) 
+    {
+        return saveInternal(filename, points, [](const cv::Point3d& p) { return p; }, maxCoord);
+    }
 
-        ofs << "ply\n";
-        ofs << "format ascii 1.0\n";
-        ofs << "element vertex " << points.size() << "\n";
-        ofs << "property float x\n";
-        ofs << "property float y\n";
-        ofs << "property float z\n";
-        ofs << "end_header\n";
-
-        for (const auto& pt : points) {
-            ofs << pt.position.x << " " 
-                << pt.position.y << " " 
-                << pt.position.z << "\n";
-        }
-        return true;
+    /// @brief Збереження хмари MapPoint3D
+    /// @param maxCoord Порогове значення для фільтрації триангуляційних викидів (|x|, |y|, |z| <= maxCoord)
+    static bool save(const std::string& filename, 
+                     const std::vector<MapPoint3D>& points, 
+                     double maxCoord = 100.0) 
+    {
+        return saveInternal(filename, points, [](const MapPoint3D& mp) { return mp.position; }, maxCoord);
     }
 };

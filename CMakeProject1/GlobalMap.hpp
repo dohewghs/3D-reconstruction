@@ -36,15 +36,22 @@ public:
     #pragma endregion
 
     #pragma region Map Points
-    int addPoint3D(const cv::Point3d& position, const cv::Mat& descriptor, int frameId1, int keypointIdx1, int frameId2, int keypointIdx2) {
+    int addPoint3D(const cv::Point3d& position, const cv::Mat& descriptor, 
+               int frameId1, int keypointIdx1, int frameId2, int keypointIdx2) 
+    {
         MapPoint3D point;
         point.id = nextPointId++;
         point.position = position;
-        point.descriptor = descriptor.clone(); // Копіюємо дескриптор
+        point.descriptor = descriptor.clone();
         point.observations[frameId1] = keypointIdx1;
         point.observations[frameId2] = keypointIdx2;
 
         mapPoints[point.id] = point;
+
+        // ВАЖЛИВО: Обов'язково оновлюємо зворотні індекси для обох кадрів
+        frameToPointMap[frameId1][keypointIdx1] = point.id;
+        frameToPointMap[frameId2][keypointIdx2] = point.id;
+
         return point.id;
     }
 
@@ -76,32 +83,34 @@ public:
         const std::vector<cv::DMatch>& matches,
         std::vector<cv::Point3f>& outPoints3D,
         std::vector<cv::Point2f>& outPoints2D,
-        std::vector<int>& outPointIds) const {
+        std::vector<int>& outPointIds,
+        std::vector<int>& outCurrentKeypointIndices) const // <--- ДОДАЙТЕ ЦЕЙ ВЕКТОР
+    {
         outPoints3D.clear();
         outPoints2D.clear();
         outPointIds.clear();
+        outCurrentKeypointIndices.clear();
 
         for (const auto& m : matches) {
             int refKeypointIdx = m.queryIdx;
             int currentKeypointIdx = m.trainIdx;
 
             int pointId = getPointIdForFrameKeypoint(refFrameId, refKeypointIdx);
-
-            if (pointId == -1) continue; // Якщо немає відповідної 3D-точки, пропускаємо
+            if (pointId == -1) continue;
 
             const auto& mapPointIt = mapPoints.find(pointId);
-            if (mapPointIt == mapPoints.end()) continue; // Якщо 3D-точка не знайдена, пропускаємо
+            if (mapPointIt == mapPoints.end()) continue;
 
             const MapPoint3D& mapPoint = mapPointIt->second;
 
-            outPoints3D.push_back(cv::Point3f(
+            outPoints3D.emplace_back(
                 static_cast<float>(mapPoint.position.x),
                 static_cast<float>(mapPoint.position.y),
                 static_cast<float>(mapPoint.position.z)
-            ));
-
+            );
             outPoints2D.push_back(currentFrame.keypoints[currentKeypointIdx].pt);
             outPointIds.push_back(pointId);
+            outCurrentKeypointIndices.push_back(currentKeypointIdx); // <--- ПРЯМИЙ ЗАПИС
         }
     }
     #pragma endregion
