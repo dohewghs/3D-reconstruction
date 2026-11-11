@@ -32,6 +32,7 @@ private:
     double m_minAngleDeg, m_maxAngleDeg;
     int m_minSharedPoints;
     int m_maxNumDisparities;
+    bool m_useClahe = true;
 
     struct ScaledImages { cv::Mat gray, color; };
     mutable std::unordered_map<int, ScaledImages> m_cache;
@@ -49,6 +50,12 @@ private:
             s.color = color;
         }
         cv::cvtColor(s.color, s.gray, cv::COLOR_BGR2GRAY);
+        // Нічні фото: стіни майже однотонні й темні. Локальне вирівнювання контрасту (CLAHE)
+        // проявляє фактуру штукатурки/панелей, і SGBM знаходить відповідності там, де раніше були дірки
+        if (m_useClahe) {
+            auto clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
+            clahe->apply(s.gray, s.gray);
+        }
         return m_cache[frame.id] = s;
     }
 
@@ -121,6 +128,7 @@ public:
     }
 
     const cv::Mat& getCameraMatrix() const { return m_K; }
+    void setUseClahe(bool enabled) { m_useClahe = enabled; m_cache.clear(); }
 
     const cv::Mat& colorImage(const Frame& frame) const { return images(frame).color; }
 

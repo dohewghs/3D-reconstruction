@@ -34,6 +34,7 @@ static void printUsage(const char* exe) {
               << "  --max-dim N        робоча роздільність SfM: більша сторона, px (типово 2000)\n"
               << "  --dense-scale S    роздільність щільної стадії відносно SfM (типово 0.7)\n"
               << "  --match-window N   зіставляти кадри на відстані <= N (типово 10, 0 = всі пари)\n"
+              << "  --mesh-step N      крок сітки поверхні, px (типово 2; 1 = максимальна деталізація)\n"
               << "  --output PREFIX    префікс вихідних файлів (типово reconstruction)\n";
 }
 
@@ -60,6 +61,7 @@ int main(int argc, char** argv) {
         else if (arg == "--max-dim" && hasValue) maxDimension = std::stoi(argv[++i]);
         else if (arg == "--dense-scale" && hasValue) options.denseScale = std::stod(argv[++i]);
         else if (arg == "--match-window" && hasValue) options.matchWindow = std::stoi(argv[++i]);
+        else if (arg == "--mesh-step" && hasValue) options.meshStep = std::max(1, std::stoi(argv[++i]));
         else if (arg == "--output" && hasValue) outputPrefix = argv[++i];
         else {
             std::cerr << "Невідомий аргумент: " << arg << std::endl;

@@ -44,7 +44,9 @@ public:
      * усереднюється з підтвердженнями. Хибні збіги SGBM не узгоджуються між різними парами
      * і відсіюються.
      *
-     * @param rawOut  якщо не nullptr — сюди потрапляють усі точки до фільтрації (для порівняння)
+     * @param rawOut         якщо не nullptr — сюди потрапляють усі точки до фільтрації (для порівняння)
+     * @param fusedDepthOut  якщо не nullptr — для кожної карти: глибина узгоджених (усереднених) точок
+     *                       у її опорному кадрі, 0 там, де точку відкинуто (потрібно для побудови поверхні)
      */
     static std::vector<DensePoint3D> fuseDepthMaps(
         const std::vector<DepthMap>& maps,
@@ -53,7 +55,8 @@ public:
         const std::unordered_map<int, cv::Mat>& colorImages,
         int minConsistent = 1,
         double relTolerance = 0.015,
-        std::vector<DensePoint3D>* rawOut = nullptr)
+        std::vector<DensePoint3D>* rawOut = nullptr,
+        std::vector<cv::Mat>* fusedDepthOut = nullptr)
     {
         std::vector<DensePoint3D> fused;
         cv::Mat Kd;
@@ -74,6 +77,8 @@ public:
             cv::Matx33d Rt = rotations[i].t();
             const cv::Vec3d& t = translations[i];
             const cv::Mat& color = colorImages.at(dm.refId);
+            cv::Mat fusedDepth;
+            if (fusedDepthOut) fusedDepth = cv::Mat::zeros(dm.depth.size(), CV_32F);
 
             // Інші карти, які можуть підтвердити точку (не з того ж кадру і не з тієї ж пари)
             std::vector<size_t> others;
@@ -119,13 +124,19 @@ public:
                         rawOut->push_back(p);
                     }
                     if (support >= minConsistent) {
-                        p.position = geom::toPoint(sum / static_cast<double>(support + 1));
+                        cv::Vec3d mean = sum / static_cast<double>(support + 1);
+                        p.position = geom::toPoint(mean);
                         fused.push_back(p);
+                        if (fusedDepthOut) {
+                            double zf = (rotations[i] * mean + t)[2];
+                            if (zf > 0) fusedDepth.at<float>(v, u) = static_cast<float>(zf);
+                        }
                         kept++;
                     }
                 }
             }
 
+            if (fusedDepthOut) fusedDepthOut->push_back(fusedDepth);
             std::cout << "[Злиття] Карта #" << dm.refId << " (пара з #" << dm.srcId << "): "
                       << total << " пікселів, узгоджених: " << kept << std::endl;
         }

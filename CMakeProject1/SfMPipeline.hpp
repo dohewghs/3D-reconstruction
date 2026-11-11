@@ -29,6 +29,7 @@
 #include "PlyExporter.hpp"
 #include "DenseReconstructor.hpp"
 #include "PointCloudFilter.hpp"
+#include "MeshReconstructor.hpp"
 #include "GeometryUtils.hpp"
 
 struct SfMPipelineOptions {
@@ -42,6 +43,7 @@ struct SfMPipelineOptions {
     double denseScale = 0.7;             // Роздільність щільної стадії відносно роздільності SfM
     double fusionTolerance = 0.015;      // Допустима відносна розбіжність глибин між видами
     int fusionMinConsistent = 1;         // Скільки ІНШИХ карт глибин мають підтвердити точку
+    int meshStep = 2;                    // Крок сітки поверхні в пікселях карти глибин (1 = максимальна деталізація)
 };
 
 class SfMPipeline{
@@ -253,12 +255,20 @@ private:
         }
 
         std::vector<DensePoint3D> rawCloud;
+        std::vector<cv::Mat> fusedDepths;
         auto fused = PointCloudFilter::fuseDepthMaps(depthMaps, model.map.getCameraPoses(), denseEngine.getCameraMatrix(),
                                                      colorImages, m_options.fusionMinConsistent,
-                                                     m_options.fusionTolerance, &rawCloud);
+                                                     m_options.fusionTolerance, &rawCloud, &fusedDepths);
         PlyExporter::saveColored(prefix + "_dense_raw.ply", rawCloud);
 
         if (fused.empty()) return 0;
+
+        // Суцільна поверхня з узгоджених карт глибин
+        std::cout << "\n[Пайплайн] Побудова поверхні (mesh) для " << prefix << "..." << std::endl;
+        MeshReconstructor meshBuilder(m_options.meshStep);
+        ColoredMesh mesh = meshBuilder.buildFromDepthMaps(fusedDepths, depthMaps, model.map.getCameraPoses(),
+                                                          denseEngine.getCameraMatrix(), colorImages);
+        if (!mesh.faces.empty()) MeshReconstructor::savePlyMesh(prefix + "_mesh.ply", mesh);
 
         // Проріджування: воксель ~ 1 піксель на медіанній глибині сцени (прибирає дублікати з різних карт)
         std::vector<double> depths;
@@ -294,8 +304,8 @@ public:
     }
 
     /**
-     * @param outputPrefix файли моделей: <prefix>_model<i>_sparse.ply / _dense.ply / _dense_raw.ply.
-     *                     Найбільша модель додатково копіюється у final_sparse_cloud.ply / final_dense_cloud.ply.
+     * @param outputPrefix файли моделей: <prefix>_model<i>_sparse.ply / _dense.ply / _dense_raw.ply / _mesh.ply.
+     *                     Найбільша модель додатково копіюється у final_sparse_cloud.ply / final_dense_cloud.ply / final_mesh.ply.
      */
     bool run(const std::string& outputPrefix = "reconstruction") {
         // Етап 1: кадри та ознаки
@@ -379,6 +389,7 @@ public:
         std::error_code ec;
         fs::copy_file(largestPrefix + "_dense.ply", "final_dense_cloud.ply", fs::copy_options::overwrite_existing, ec);
         fs::copy_file(largestPrefix + "_dense_raw.ply", "final_dense_cloud_raw.ply", fs::copy_options::overwrite_existing, ec);
+        fs::copy_file(largestPrefix + "_mesh.ply", "final_mesh.ply", fs::copy_options::overwrite_existing, ec);
 
         std::cout << "[Пайплайн] Роботу успішно завершено!" << std::endl;
         return true;
