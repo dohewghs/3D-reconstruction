@@ -4,6 +4,10 @@
 #include <memory>
 #include <opencv2/core/mat.hpp>
 #include <unordered_map>
+#include <set>
+#include <tuple>
+#include <fstream>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -15,14 +19,30 @@
 #include "IFramePreprocessor.hpp"
 #include "IFeatureExtractor.hpp"
 #include "IFeatureMatcher.hpp"
+#include "DirectoryFrameProvider.hpp"
 #include "TwoViewGeometryEstimator.hpp"
 #include "GlobalMap.hpp"
+#include "FeatureTracks.hpp"
 #include "PnpTracker.hpp"
 #include "IncrementalTriangulator.hpp"
 #include "BundleAdjuster.hpp"
 #include "PlyExporter.hpp"
 #include "DenseReconstructor.hpp"
 #include "PointCloudFilter.hpp"
+#include "GeometryUtils.hpp"
+
+struct SfMPipelineOptions {
+    int matchWindow = 10;                // Зіставляти кадри, що відстоять не більше ніж на N позицій (0 = всі пари)
+    int maxInitPairGap = 3;              // Початкова пара шукається серед кадрів з різницею індексів <= N
+    int minInitMatches = 80;
+    int minInitPoints = 50;
+    double minInitMedianAngleDeg = 2.0;  // Менший кут — базис замалий, глибини початкової пари ненадійні
+    double maxReprojectionErrorPx = 4.0;
+    double minTriangulationAngleDeg = 1.5;
+    double denseScale = 0.7;             // Роздільність щільної стадії відносно роздільності SfM
+    double fusionTolerance = 0.015;      // Допустима відносна розбіжність глибин між видами
+    int fusionMinConsistent = 1;         // Скільки ІНШИХ карт глибин мають підтвердити точку
+};
 
 class SfMPipeline{
 private:
@@ -32,8 +52,22 @@ private:
     std::unique_ptr<IFeatureMatcher> m_matcher;
 
     cv::Mat m_K;
-    GlobalMap m_map;
+    SfMPipelineOptions m_options;
+
     std::unordered_map<int, Frame> m_processedFrames;
+    std::unordered_map<int, std::string> m_frameNames;
+    std::vector<int> m_frameIds;
+
+    /**
+     * Окрема реконструкція. Якщо фото містять кілька не пов'язаних між собою сцен
+     * (наприклад, два різні будинки), кожна з них стає окремою моделлю зі своїм масштабом.
+     */
+    struct Reconstruction {
+        GlobalMap map;
+        int anchorFrameId = -1;   // Кадр з позою R = I, t = 0
+        int scaleFrameId = -1;    // Другий кадр початкової пари: задає масштаб (|t| = 1)
+    };
+    std::vector<Reconstruction> m_models;
 
     bool getNextValidFrame(cv::Mat& outRawColor, Frame& outFrame, int frameId) {
         cv::Mat raw;
@@ -56,52 +90,190 @@ private:
         return false;
     }
 
-    struct DepthRange {
-        double minDepth;
-        double medianDepth;
-        double maxDepth;
-    };
+    std::string frameLabel(int frameId) const {
+        auto it = m_frameNames.find(frameId);
+        std::string label = "#" + std::to_string(frameId);
+        if (it != m_frameNames.end() && !it->second.empty()) label += " (" + it->second + ")";
+        return label;
+    }
+
+    void loadFrames() {
+        auto* directoryProvider = dynamic_cast<DirectoryFrameProvider*>(m_provider.get());
+        int frameCounter = 0;
+        cv::Mat color;
+        Frame frame;
+        while (getNextValidFrame(color, frame, frameCounter)) {
+            if (directoryProvider) m_frameNames[frame.id] = directoryProvider->currentFrameName();
+            m_processedFrames[frame.id] = frame;
+            m_frameIds.push_back(frame.id);
+            std::cout << "[Пайплайн] Кадр " << frameLabel(frame.id) << ": " << frame.keypoints.size()
+                      << " ключових точок" << std::endl;
+            frameCounter++;
+            frame = Frame();
+        }
+    }
+
+    double medianTriangulationAngle(const GlobalMap& map, int a, int b) const {
+        cv::Vec3d Ca = geom::cameraCenter(map.getCameraPose(a));
+        cv::Vec3d Cb = geom::cameraCenter(map.getCameraPose(b));
+        std::vector<double> angles;
+        for (const auto& [pointId, pt] : map.getMapPoints()) {
+            angles.push_back(geom::rayAngleDeg(geom::toVec(pt.position), Ca, Cb));
+        }
+        if (angles.empty()) return 0.0;
+        std::nth_element(angles.begin(), angles.begin() + angles.size() / 2, angles.end());
+        return angles[angles.size() / 2];
+    }
+
+    void bundleAdjust(Reconstruction& model, int iterations) {
+        BundleAdjuster ba(m_K, iterations, true);
+        ba.optimize(model.map, m_processedFrames, model.anchorFrameId, model.scaleFrameId);
+
+        double rms = 0.0;
+        int removed = ba.removeOutliers(model.map, m_processedFrames,
+                                        m_options.maxReprojectionErrorPx, m_options.minTriangulationAngleDeg, &rms);
+        std::cout << "[BA] Камер: " << model.map.getCameraPoseCount() << ", точок: " << model.map.getMapPointCount()
+                  << ", RMS репроєкції: " << rms << " px, видалено спостережень-викидів: " << removed << std::endl;
+    }
+
+    bool tryInitialize(int a, int b, const FeatureTracks& tracks, Reconstruction& outModel) {
+        auto matches = tracks.matchesBetween(a, b);
+        if (static_cast<int>(matches.size()) < m_options.minInitMatches) return false;
+
+        TwoViewGeometryEstimator initializer(m_K);
+        auto initResult = initializer.reconstruct(m_processedFrames.at(a), m_processedFrames.at(b), matches);
+        if (initResult.R.empty() || initResult.t.empty()) return false;
+
+        Reconstruction model;
+        model.anchorFrameId = a;
+        model.scaleFrameId = b;
+        model.map.addCameraPose(a, CameraPose(cv::Mat::eye(3, 3, CV_64F), cv::Mat::zeros(3, 1, CV_64F)));
+        model.map.addCameraPose(b, CameraPose(initResult.R.clone(), initResult.t.clone()));
+
+        IncrementalTriangulator triangulator(m_K, m_options.minTriangulationAngleDeg, m_options.maxReprojectionErrorPx);
+        int points = triangulator.triangulateTracks(tracks, m_processedFrames, model.map);
+        double angle = medianTriangulationAngle(model.map, a, b);
+
+        std::cout << "[Ініціалізація] Пара " << frameLabel(a) << " <-> " << frameLabel(b) << ": "
+                  << matches.size() << " збігів, " << points << " точок, медіанний кут " << angle << "°" << std::endl;
+
+        if (points < m_options.minInitPoints || angle < m_options.minInitMedianAngleDeg) return false;
+
+        outModel = std::move(model);
+        return true;
+    }
+
+    // Нарощує модель кадрами, доки хоч один з unregistered вдається зареєструвати
+    void growModel(Reconstruction& model, const FeatureTracks& tracks, const std::set<int>& unregistered) {
+        PnpTracker pnpTracker(m_K, cv::Mat(), 15, 0.3, m_options.maxReprojectionErrorPx);
+        IncrementalTriangulator triangulator(m_K, m_options.minTriangulationAngleDeg, m_options.maxReprojectionErrorPx);
+
+        while (true) {
+            // Кандидати впорядковані за кількістю 2D-3D відповідностей (найнадійніші — першими)
+            std::vector<std::pair<size_t, int>> candidates;
+            for (int frameId : unregistered) {
+                if (model.map.hasCameraPose(frameId)) continue;
+                size_t n = pnpTracker.countCorrespondences(m_processedFrames.at(frameId), tracks, model.map);
+                if (n >= 5) candidates.emplace_back(n, frameId);
+            }
+            std::sort(candidates.rbegin(), candidates.rend());
+
+            bool registered = false;
+            for (const auto& [count, frameId] : candidates) {
+                std::cout << "\n==========================================" << std::endl;
+                std::cout << "[Пайплайн] Реєстрація кадру " << frameLabel(frameId) << "..." << std::endl;
+                if (!pnpTracker.registerFrame(m_processedFrames.at(frameId), m_processedFrames, tracks, model.map)) continue;
+
+                int newPoints = triangulator.triangulateTracks(tracks, m_processedFrames, model.map, frameId);
+                std::cout << "[Пайплайн] Кадр " << frameLabel(frameId) << " інтегровано. Додано точок: " << newPoints << std::endl;
+                bundleAdjust(model, 25);
+                registered = true;
+                break;
+            }
+            if (!registered) break;
+        }
+    }
+
+    void exportModel(const Reconstruction& model, const std::string& prefix) {
+        PlyExporter::save(prefix + "_sparse.ply", model.map.getAllMapPoints(), 1e6);
+        std::cout << "[Пайплайн] Розріджена хмара: " << prefix << "_sparse.ply ("
+                  << model.map.getMapPointCount() << " точок)" << std::endl;
+
+        // Пози камер (World-to-Camera: X_c = R * X_w + t) — для перевірки та подальшої обробки
+        std::ofstream cams(prefix + "_cameras.txt");
+        cams << "# frame_id file R(9, по рядках) t(3) center(3)\n";
+        for (int frameId : model.map.getRegisteredFrameIds()) {
+            const CameraPose& pose = model.map.getCameraPose(frameId);
+            cv::Matx33d R = geom::rotation(pose);
+            cv::Vec3d t = geom::translation(pose), C = geom::cameraCenter(pose);
+            auto nameIt = m_frameNames.find(frameId);
+            cams << frameId << " " << (nameIt != m_frameNames.end() ? nameIt->second : "-");
+            for (int i = 0; i < 9; ++i) cams << " " << R.val[i];
+            cams << " " << t[0] << " " << t[1] << " " << t[2] << " " << C[0] << " " << C[1] << " " << C[2] << "\n";
+        }
+    }
 
     /**
-     * Діапазон глибин сцени для кожного кадру за розрідженою хмарою (після BA).
-     * Масштаб монокулярної реконструкції довільний (базис першої пари = 1), тому
-     * захардкоджені "2..35 метрів" не мають сенсу — беремо перцентилі реальних глибин.
+     * Щільна хмара однієї моделі: карти глибин зі стерео-пар -> злиття з перевіркою узгодженості.
+     * @return кількість точок у фінальній хмарі
      */
-    std::unordered_map<int, DepthRange> computeFrameDepthRanges(size_t minPoints = 20) const {
-        std::unordered_map<int, std::vector<double>> depthsPerFrame;
+    size_t densify(const Reconstruction& model, const std::string& prefix) {
+        std::cout << "\n==========================================" << std::endl;
+        std::cout << "[Пайплайн] Генерація щільної хмари точок (Dense MVS) для " << prefix << "..." << std::endl;
 
-        for (const auto& [pointId, mapPt] : m_map.getMapPoints()) {
-            for (const auto& [frameId, kpIdx] : mapPt.observations) {
-                if (!m_map.hasCameraPose(frameId)) continue;
+        DenseReconstructor denseEngine(m_K, m_options.denseScale);
+        std::vector<DepthMap> depthMaps;
+        std::set<std::pair<int, int>> processedPairs;
 
-                const CameraPose& pose = m_map.getCameraPose(frameId);
-                cv::Matx33d R = cv::Mat(pose.rotation);
-                cv::Vec3d t = cv::Mat(pose.translation);
-                cv::Vec3d Xc = R * cv::Vec3d(mapPt.position.x, mapPt.position.y, mapPt.position.z) + t;
+        for (int refId : model.map.getRegisteredFrameIds()) {
+            const Frame& refFrame = m_processedFrames.at(refId);
+            cv::Size denseSize = denseEngine.colorImage(refFrame).size();
 
-                if (std::isfinite(Xc[2]) && Xc[2] > 0.0) {
-                    depthsPerFrame[frameId].push_back(Xc[2]);
+            for (const auto& partner : denseEngine.selectStereoPartners(refId, model.map, denseSize)) {
+                std::pair<int, int> key(std::min(refId, partner.frameId), std::max(refId, partner.frameId));
+                if (!processedPairs.insert(key).second) continue;
+
+                std::cout << "[Dense MVS] Пара " << frameLabel(refId) << " - " << frameLabel(partner.frameId)
+                          << ": кут " << partner.angleDeg << "°, спільних точок " << partner.sharedPoints << std::endl;
+                for (auto& dm : denseEngine.computeDepthMaps(refFrame, m_processedFrames.at(partner.frameId), model.map)) {
+                    if (cv::countNonZero(dm.depth) > 1000) depthMaps.push_back(std::move(dm));
                 }
             }
         }
 
-        std::unordered_map<int, DepthRange> ranges;
-        for (auto& [frameId, depths] : depthsPerFrame) {
-            if (depths.size() < minPoints) continue;
-
-            std::sort(depths.begin(), depths.end());
-            auto percentile = [&](double q) {
-                return depths[static_cast<size_t>(q * (depths.size() - 1))];
-            };
-
-            // Запас: фасад може виходити за межі розріджених точок
-            ranges[frameId] = DepthRange{
-                percentile(0.05) * 0.7,
-                percentile(0.50),
-                percentile(0.95) * 1.5
-            };
+        if (depthMaps.size() < 2) {
+            std::cerr << "[Dense MVS] Замало карт глибин (" << depthMaps.size()
+                      << ") для перевірки узгодженості — щільну хмару не побудовано." << std::endl;
+            return 0;
         }
-        return ranges;
+
+        std::unordered_map<int, cv::Mat> colorImages;
+        for (int frameId : model.map.getRegisteredFrameIds()) {
+            colorImages[frameId] = denseEngine.colorImage(m_processedFrames.at(frameId));
+        }
+
+        std::vector<DensePoint3D> rawCloud;
+        auto fused = PointCloudFilter::fuseDepthMaps(depthMaps, model.map.getCameraPoses(), denseEngine.getCameraMatrix(),
+                                                     colorImages, m_options.fusionMinConsistent,
+                                                     m_options.fusionTolerance, &rawCloud);
+        PlyExporter::saveColored(prefix + "_dense_raw.ply", rawCloud);
+
+        if (fused.empty()) return 0;
+
+        // Проріджування: воксель ~ 1 піксель на медіанній глибині сцени (прибирає дублікати з різних карт)
+        std::vector<double> depths;
+        for (const auto& dm : depthMaps) {
+            for (int v = 0; v < dm.depth.rows; v += 8)
+                for (int u = 0; u < dm.depth.cols; u += 8)
+                    if (dm.depth.at<float>(v, u) > 0) depths.push_back(dm.depth.at<float>(v, u));
+        }
+        if (depths.empty()) depths.push_back(1.0);
+        std::nth_element(depths.begin(), depths.begin() + depths.size() / 2, depths.end());
+        double voxelSize = depths[depths.size() / 2] / denseEngine.getCameraMatrix().at<double>(0, 0);
+
+        auto thinned = PointCloudFilter::voxelFuse(fused, voxelSize, 1);
+        PlyExporter::saveColored(prefix + "_dense.ply", thinned);
+        return thinned.size();
     }
 
 public:
@@ -110,178 +282,107 @@ public:
         std::unique_ptr<IFramePreprocessor> preprocessor,
         std::unique_ptr<IFeatureExtractor> extractor,
         std::unique_ptr<IFeatureMatcher> matcher,
-        const cv::Mat& cameraMatrix)
+        const cv::Mat& cameraMatrix,
+        const SfMPipelineOptions& options = SfMPipelineOptions())
         : m_provider(std::move(provider)),
           m_preprocessor(std::move(preprocessor)),
           m_extractor(std::move(extractor)),
-          m_matcher(std::move(matcher))
+          m_matcher(std::move(matcher)),
+          m_options(options)
     {
         cameraMatrix.convertTo(m_K, CV_64F);
     }
 
-    bool run(const std::string& outputPlyPath = "final_sparse_cloud.ply") {
-        int frameCounter = 0;
-
-        // Етап 1
-
-        cv::Mat frame0Color;
-        Frame frame0;
-        if (!getNextValidFrame(frame0Color, frame0, frameCounter++)) {
-            std::cerr << "[Помилка] Не вдалося завантажити перший кадр." << std::endl;
+    /**
+     * @param outputPrefix файли моделей: <prefix>_model<i>_sparse.ply / _dense.ply / _dense_raw.ply.
+     *                     Найбільша модель додатково копіюється у final_sparse_cloud.ply / final_dense_cloud.ply.
+     */
+    bool run(const std::string& outputPrefix = "reconstruction") {
+        // Етап 1: кадри та ознаки
+        loadFrames();
+        if (m_frameIds.size() < 2) {
+            std::cerr << "[Помилка] Потрібно щонайменше 2 придатні кадри (знайдено " << m_frameIds.size() << ")." << std::endl;
             return false;
         }
 
-        m_processedFrames[frame0.id] = frame0;
-        std::cout << "[Пайплайн] Базовий Кадр #" << frame0.id << " успішно зчитано ("
-                  << frame0.keypoints.size() << " точок AKAZE)." << std::endl;
+        // Етап 2: збіги між усіма парами + треки
+        std::cout << "\n==========================================" << std::endl;
+        TrackBuilder trackBuilder(m_options.matchWindow, 30, 2.0);
+        FeatureTracks tracks = trackBuilder.build(m_frameIds, m_processedFrames, *m_matcher);
 
-        // Етап 2
-
-        cv::Mat frame1Color;
-        Frame frame1;
-        if (!getNextValidFrame(frame1Color, frame1, frameCounter++)) {
-            std::cerr << "[Помилка] Не вдалося завантажити другий кадр для ініціалізації." << std::endl;
-            return false;
-        }
-        m_processedFrames[frame1.id] = frame1;
-
-        std::cout << "[Пайплайн] Зіставлення початкової пари (#0 <-> #1)..." << std::endl;
-        auto initialMatches = m_matcher->match(frame0.descriptors, frame1.descriptors);
-
-        TwoViewGeometryEstimator initializer(m_K);
-        auto initResult = initializer.reconstruct(frame0, frame1, initialMatches);
-
-        if (!initResult.success || initResult.points3D.size() < 30) { 
-            std::cerr << "[Помилка] Ініціалізація не вдалася (замало інлаєрів: " 
-                      << initResult.points3D.size() << ")." << std::endl;
-            return false;
-        }
-
-        cv::Mat R0 = cv::Mat::eye(3,3,CV_64F);
-        cv::Mat t0 = cv::Mat::zeros(3,1,CV_64F);
-        m_map.addCameraPose(frame0.id, CameraPose(R0, t0));
-        m_map.addCameraPose(frame1.id, CameraPose(initResult.R, initResult.t));
-
-        // Заповнюємо карту початковими тріангульованими 3D-точками
-        for (size_t i = 0; i < initResult.points3D.size(); ++i) {
-            int matchIdx = initResult.inlierMatchIndices[i];
-            int kpIdx0 = initialMatches[matchIdx].queryIdx;
-            int kpIdx1 = initialMatches[matchIdx].trainIdx;
-
-            cv::Mat desc = frame0.descriptors.row(kpIdx0).clone();
-            m_map.addPoint3D(initResult.points3D[i], desc, frame0.id, kpIdx0, frame1.id, kpIdx1);
-        }
-
-        std::cout << "[Пайплайн] Ініціалізація завершена! В карті: " << m_map.getMapPointCount() << " точок." << std::endl;
-
-        PnpTracker pnpTracker(m_K);
-        IncrementalTriangulator triangulator(m_K);
-
-        Frame prevFrame = frame1;
-
-        // Етап 3
-
-        cv::Mat currColor;
-        Frame currFrame;
-
-        while (getNextValidFrame(currColor, currFrame, frameCounter++)){
-            std::cout << "\n==========================================" << std::endl;
-            std::cout << "[Пайплайн] Обробка Кадру #" << currFrame.id << "..." << std::endl;
-            m_processedFrames[currFrame.id] = currFrame;
-
-            auto matches = m_matcher->match(prevFrame.descriptors, currFrame.descriptors);
-            std::cout << "[Пайплайн] Збігів із Кадром #" << prevFrame.id << ": " << matches.size() << std::endl;
-
-            bool tracked = pnpTracker.trackAndRegisterFrame(prevFrame.id, currFrame, matches, m_map);
-            if (!tracked){
-                std::cerr << "[Увага] Пропуск кадру #" << currFrame.id << " через зрив трекінгу PnP." << std::endl;
-                continue;
+        // Етап 3: інкрементальний SfM. Кадри, які не вдалось приєднати, починають нову модель
+        std::set<int> unregistered(m_frameIds.begin(), m_frameIds.end());
+        while (unregistered.size() >= 2) {
+            std::vector<std::tuple<int, size_t, int, int>> initCandidates; // (позиція a, -збіги, a, b)
+            for (size_t i = 0; i < m_frameIds.size(); ++i) {
+                for (size_t j = i + 1; j < m_frameIds.size() && static_cast<int>(j - i) <= m_options.maxInitPairGap; ++j) {
+                    int a = m_frameIds[i], b = m_frameIds[j];
+                    if (!unregistered.count(a) || !unregistered.count(b)) continue;
+                    size_t n = tracks.matchCount(a, b);
+                    if (static_cast<int>(n) >= m_options.minInitMatches) initCandidates.emplace_back(static_cast<int>(i), SIZE_MAX - n, a, b);
+                }
             }
+            std::sort(initCandidates.begin(), initCandidates.end());
 
-            int newPoints = triangulator.triangulateNewPoints(prevFrame, currFrame, matches, m_map);
+            Reconstruction model;
+            bool initialized = false;
+            std::cout << "\n==========================================" << std::endl;
+            for (const auto& [pos, negMatches, a, b] : initCandidates) {
+                if (tryInitialize(a, b, tracks, model)) { initialized = true; break; }
+            }
+            if (!initialized) break;
 
-            std::cout << "[Пайплайн] Кадр #" << currFrame.id << " успішно інтегровано. "
-                      << "Додано точок: " << newPoints << " | Всього в карті: " << m_map.getMapPointCount() << std::endl;
+            bundleAdjust(model, 25);
+            growModel(model, tracks, unregistered);
 
-            prevFrame = currFrame;
+            std::cout << "\n==========================================" << std::endl;
+            std::cout << "[Пайплайн] Фінальний Bundle Adjustment моделі #" << m_models.size() << "..." << std::endl;
+            bundleAdjust(model, 100);
+
+            for (int frameId : model.map.getRegisteredFrameIds()) unregistered.erase(frameId);
+            m_models.push_back(std::move(model));
         }
 
-        // Етам 4
+        if (m_models.empty()) {
+            std::cerr << "[Помилка] Не знайдено жодної пари кадрів, придатної для ініціалізації." << std::endl;
+            return false;
+        }
+
         std::cout << "\n==========================================" << std::endl;
-        std::cout << "[Пайплайн] Запуск глобального Bundle Adjustment..." << std::endl;
-        std::cout << "Оптимізація для " << m_map.getCameraPoseCount() << " камер та " 
-                  << m_map.getMapPointCount() << " точок..." << std::endl;
-
-        BundleAdjuster ba(m_K, 40, true);
-        ba.optimize(m_map, m_processedFrames, true);
-
-        std::cout << "[Пайплайн] Експорт оптимізованої хмари точок у: " << outputPlyPath << std::endl;
-        PlyExporter::save(outputPlyPath, m_map.getAllMapPoints());
-
-        // Етап 5: Dense Stereo Reconstruction
-        std::cout << "\n==========================================" << std::endl;
-        std::cout << "[Пайплайн] Генерація щільної хмари точок (Dense MVS)..." << std::endl;
-
-        std::vector<int> registeredIds;
-        for (const auto& [frameId, frame] : m_processedFrames) {
-            if (m_map.hasCameraPose(frameId)) registeredIds.push_back(frameId);
+        std::cout << "[Пайплайн] Побудовано моделей: " << m_models.size() << std::endl;
+        for (size_t i = 0; i < m_models.size(); ++i) {
+            std::cout << "   Модель " << i << ": кадри";
+            for (int id : m_models[i].map.getRegisteredFrameIds()) std::cout << " " << frameLabel(id);
+            std::cout << " | точок: " << m_models[i].map.getMapPointCount() << std::endl;
         }
-        std::sort(registeredIds.begin(), registeredIds.end());
-
-        auto depthRanges = computeFrameDepthRanges();
-
-        DenseReconstructor denseEngine(m_K);
-        std::vector<DensePoint3D> totalDenseCloud;
-        std::vector<double> medianDepths;
-        const size_t maxLookahead = 30;
-        int pairCount = 0;
-
-        for (size_t a = 0; a < registeredIds.size(); ++a) {
-            int refId = registeredIds[a];
-            auto rangeIt = depthRanges.find(refId);
-            if (rangeIt == depthRanges.end()) continue;
-            const DepthRange& range = rangeIt->second;
-
-            // Кандидати — наступні зареєстровані кадри (не лише сусідній: у нього замалий базис)
-            std::vector<int> candidates(
-                registeredIds.begin() + a + 1,
-                registeredIds.begin() + std::min(registeredIds.size(), a + 1 + maxLookahead));
-
-            int partnerId = denseEngine.selectStereoPartner(
-                refId, candidates, m_map, range.medianDepth);
-            if (partnerId < 0) continue;
-
-            auto pairPoints = denseEngine.reconstructDensePair(
-                m_processedFrames.at(refId), m_processedFrames.at(partnerId),
-                m_map.getCameraPose(refId), m_map.getCameraPose(partnerId),
-                range.minDepth, range.maxDepth,
-                pairCount
-            );
-            if (pairPoints.empty()) continue;
-
-            pairCount++;
-            medianDepths.push_back(range.medianDepth);
-            totalDenseCloud.insert(totalDenseCloud.end(), pairPoints.begin(), pairPoints.end());
+        if (!unregistered.empty()) {
+            std::cout << "   Не вдалося приєднати кадри:";
+            for (int id : unregistered) std::cout << " " << frameLabel(id);
+            std::cout << std::endl;
         }
 
-        if (totalDenseCloud.empty()) {
-            std::cerr << "[Dense MVS] Не вдалося побудувати жодної стерео-пари." << std::endl;
-        } else {
-            PlyExporter::saveColored("final_dense_cloud_raw.ply", totalDenseCloud);
-
-            // Розмір вокселя ~ 2 пікселі на типовій глибині сцени
-            std::nth_element(medianDepths.begin(), medianDepths.begin() + medianDepths.size() / 2, medianDepths.end());
-            double sceneDepth = medianDepths[medianDepths.size() / 2];
-            double voxelSize = 2.0 * sceneDepth / m_K.at<double>(0, 0);
-            int minSources = (pairCount >= 2) ? 2 : 1;
-
-            auto fusedCloud = PointCloudFilter::voxelFuse(totalDenseCloud, voxelSize, minSources);
-            PlyExporter::saveColored("final_dense_cloud.ply", fusedCloud);
+        // Етап 4: щільна хмара для кожної моделі
+        size_t largestModel = 0;
+        for (size_t i = 0; i < m_models.size(); ++i) {
+            if (m_models[i].map.getCameraPoseCount() > m_models[largestModel].map.getCameraPoseCount()) largestModel = i;
         }
+
+        for (size_t i = 0; i < m_models.size(); ++i) {
+            std::string prefix = outputPrefix + "_model" + std::to_string(i);
+            exportModel(m_models[i], prefix);
+            densify(m_models[i], prefix);
+        }
+
+        // Найбільша модель — під звичними іменами
+        PlyExporter::save("final_sparse_cloud.ply", m_models[largestModel].map.getAllMapPoints(), 1e6);
+        std::string largestPrefix = outputPrefix + "_model" + std::to_string(largestModel);
+        std::error_code ec;
+        fs::copy_file(largestPrefix + "_dense.ply", "final_dense_cloud.ply", fs::copy_options::overwrite_existing, ec);
+        fs::copy_file(largestPrefix + "_dense_raw.ply", "final_dense_cloud_raw.ply", fs::copy_options::overwrite_existing, ec);
 
         std::cout << "[Пайплайн] Роботу успішно завершено!" << std::endl;
         return true;
-    } 
+    }
 
-    const GlobalMap& getMap() const { return m_map; }
+    const std::vector<Reconstruction>& getModels() const { return m_models; }
 };

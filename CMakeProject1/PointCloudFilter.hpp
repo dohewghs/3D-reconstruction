@@ -8,6 +8,7 @@
 #include <opencv2/core.hpp>
 
 #include "Types.hpp"
+#include "GeometryUtils.hpp"
 
 class PointCloudFilter {
 private:
@@ -34,6 +35,103 @@ private:
     }
 
 public:
+    /**
+     * Злиття карт глибин з перевіркою узгодженості між видами.
+     *
+     * Кожен піксель карти i переводиться у світ і проєктується в опорні кадри інших карт.
+     * Якщо там є глибина, що відрізняється не більше ніж на relTolerance, — це підтвердження
+     * від незалежного виду. Точка лишається, якщо підтверджень >= minConsistent; її позиція
+     * усереднюється з підтвердженнями. Хибні збіги SGBM не узгоджуються між різними парами
+     * і відсіюються.
+     *
+     * @param rawOut  якщо не nullptr — сюди потрапляють усі точки до фільтрації (для порівняння)
+     */
+    static std::vector<DensePoint3D> fuseDepthMaps(
+        const std::vector<DepthMap>& maps,
+        const std::unordered_map<int, CameraPose>& poses,
+        const cv::Mat& cameraMatrix,
+        const std::unordered_map<int, cv::Mat>& colorImages,
+        int minConsistent = 1,
+        double relTolerance = 0.015,
+        std::vector<DensePoint3D>* rawOut = nullptr)
+    {
+        std::vector<DensePoint3D> fused;
+        cv::Mat Kd;
+        cameraMatrix.convertTo(Kd, CV_64F);
+        const double fx = Kd.at<double>(0, 0), fy = Kd.at<double>(1, 1);
+        const double cx = Kd.at<double>(0, 2), cy = Kd.at<double>(1, 2);
+
+        // Пози опорних кадрів карт — один раз, а не на кожен піксель
+        std::vector<cv::Matx33d> rotations(maps.size());
+        std::vector<cv::Vec3d> translations(maps.size());
+        for (size_t i = 0; i < maps.size(); ++i) {
+            rotations[i] = geom::rotation(poses.at(maps[i].refId));
+            translations[i] = geom::translation(poses.at(maps[i].refId));
+        }
+
+        for (size_t i = 0; i < maps.size(); ++i) {
+            const DepthMap& dm = maps[i];
+            cv::Matx33d Rt = rotations[i].t();
+            const cv::Vec3d& t = translations[i];
+            const cv::Mat& color = colorImages.at(dm.refId);
+
+            // Інші карти, які можуть підтвердити точку (не з того ж кадру і не з тієї ж пари)
+            std::vector<size_t> others;
+            for (size_t j = 0; j < maps.size(); ++j) {
+                if (j == i || maps[j].refId == dm.refId) continue;
+                bool samePair = (maps[j].refId == dm.srcId && maps[j].srcId == dm.refId);
+                if (!samePair) others.push_back(j);
+            }
+
+            size_t kept = 0, total = 0;
+            for (int v = 0; v < dm.depth.rows; ++v) {
+                const float* row = dm.depth.ptr<float>(v);
+                for (int u = 0; u < dm.depth.cols; ++u) {
+                    double z = row[u];
+                    if (z <= 0) continue;
+                    total++;
+
+                    cv::Vec3d Xc((u - cx) / fx * z, (v - cy) / fy * z, z);
+                    cv::Vec3d Xw = Rt * (Xc - t);
+
+                    cv::Vec3d sum = Xw;
+                    int support = 0;
+                    for (size_t j : others) {
+                        const DepthMap& other = maps[j];
+                        cv::Vec3d Xo = rotations[j] * Xw + translations[j];
+                        if (!(Xo[2] > 0)) continue;
+                        int uo = cvRound(fx * Xo[0] / Xo[2] + cx);
+                        int vo = cvRound(fy * Xo[1] / Xo[2] + cy);
+                        if (uo < 0 || vo < 0 || uo >= other.depth.cols || vo >= other.depth.rows) continue;
+                        double zo = other.depth.at<float>(vo, uo);
+                        if (zo <= 0 || std::abs(zo - Xo[2]) > relTolerance * zo) continue;
+
+                        cv::Vec3d XoMeasured((uo - cx) / fx * zo, (vo - cy) / fy * zo, zo);
+                        sum += rotations[j].t() * (XoMeasured - translations[j]);
+                        support++;
+                    }
+
+                    DensePoint3D p;
+                    p.color = color.at<cv::Vec3b>(v, u);
+                    p.sourceId = static_cast<int>(i);
+                    if (rawOut) {
+                        p.position = geom::toPoint(Xw);
+                        rawOut->push_back(p);
+                    }
+                    if (support >= minConsistent) {
+                        p.position = geom::toPoint(sum / static_cast<double>(support + 1));
+                        fused.push_back(p);
+                        kept++;
+                    }
+                }
+            }
+
+            std::cout << "[Злиття] Карта #" << dm.refId << " (пара з #" << dm.srcId << "): "
+                      << total << " пікселів, узгоджених: " << kept << std::endl;
+        }
+        return fused;
+    }
+
     /**
      * Злиття щільної хмари у воксельну сітку.
      *

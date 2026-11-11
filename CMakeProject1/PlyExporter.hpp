@@ -88,7 +88,8 @@ public:
                             const std::vector<DensePoint3D>& points,
                             double maxCoord = 1e6) // масштаб монокулярного SfM довільний, тому 100 обрізало фасад
     {
-        std::ofstream ofs(filename);
+        // Бінарний PLY: на мільйонах точок ASCII займає десятки МБ і повільно відкривається
+        std::ofstream ofs(filename, std::ios::binary);
         if (!ofs.is_open()) return false;
 
         std::vector<DensePoint3D> filtered;
@@ -101,7 +102,7 @@ public:
         }
 
         ofs << "ply\n";
-        ofs << "format ascii 1.0\n";
+        ofs << "format binary_little_endian 1.0\n";
         ofs << "element vertex " << filtered.size() << "\n";
         ofs << "property float x\n";
         ofs << "property float y\n";
@@ -112,11 +113,11 @@ public:
         ofs << "end_header\n";
 
         for (const auto& p : filtered) {
+            float xyz[3] = { static_cast<float>(p.position.x), static_cast<float>(p.position.y), static_cast<float>(p.position.z) };
             // OpenCV зберігає колір як BGR, тому записуємо: R = color[2], G = color[1], B = color[0]
-            ofs << p.position.x << " " << p.position.y << " " << p.position.z << " "
-                << static_cast<int>(p.color[2]) << " "
-                << static_cast<int>(p.color[1]) << " "
-                << static_cast<int>(p.color[0]) << "\n";
+            unsigned char rgb[3] = { p.color[2], p.color[1], p.color[0] };
+            ofs.write(reinterpret_cast<const char*>(xyz), sizeof(xyz));
+            ofs.write(reinterpret_cast<const char*>(rgb), sizeof(rgb));
         }
 
         ofs.close();

@@ -27,6 +27,10 @@ add_executable (CMakeProject1
  "SfMPipeline.hpp"
  "DenseReconstructor.hpp"
  "PointCloudFilter.hpp"
+ "GeometryUtils.hpp"
+ "FeatureTracks.hpp"
+ "SiftFeatureExtractor.hpp"
+ "RatioMatcher.hpp"
 )
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
@@ -44,3 +48,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Eigen3::Eigen
     Ceres::ceres
 )
+
+# Вихідні файли в UTF-8 (українські рядки): без цього MSVC читає їх у системному кодуванні
+if (MSVC)
+  target_compile_options(${PROJECT_NAME} PRIVATE /utf-8)
+endif()

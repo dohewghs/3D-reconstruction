@@ -2,7 +2,8 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
-DirectoryFrameProvider::DirectoryFrameProvider(const std::string& _dirPath) : IFrameProvider()
+DirectoryFrameProvider::DirectoryFrameProvider(const std::string& _dirPath, int _maxDimension)
+	: IFrameProvider(), currentFrameIndex(0), maxDimension(_maxDimension)
 {
 	if (!fs::exists(_dirPath) || !fs::is_directory(_dirPath)) {
 		std::cerr << "Error: Directory isn't exist: " << _dirPath << std::endl;
@@ -45,6 +46,14 @@ bool DirectoryFrameProvider::getNextFrame(cv::Mat& outFrame)
 			continue;
 		}
 
+		// 12 Мп фото не потрібні для SfM: на ~2000 px ознаки стабільніші, а все працює в рази швидше
+		int largest = std::max(outFrame.cols, outFrame.rows);
+		if (this->maxDimension > 0 && largest > this->maxDimension)
+		{
+			double scale = static_cast<double>(this->maxDimension) / largest;
+			cv::resize(outFrame, outFrame, cv::Size(), scale, scale, cv::INTER_AREA);
+		}
+
 		return true;
 	}
 
@@ -64,4 +73,11 @@ void DirectoryFrameProvider::reset()
 size_t DirectoryFrameProvider::totalFrames()
 {
 	return this->imagePaths.size();
+}
+
+std::string DirectoryFrameProvider::currentFrameName() const
+{
+	if (this->currentFrameIndex <= 0 || this->currentFrameIndex > static_cast<long>(this->imagePaths.size()))
+		return "";
+	return this->imagePaths[this->currentFrameIndex - 1].filename().string();
 }

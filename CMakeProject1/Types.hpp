@@ -2,6 +2,7 @@
 #include <opencv2/core.hpp>
 #include <Eigen/Dense>
 #include <vector>
+#include <unordered_map>
 
 struct Frame
 {
@@ -25,6 +26,7 @@ struct CameraPose
 
 struct MapPoint3D {
     int id = -1;
+    int trackId = -1;   // Трек (ланцюжок збігів між кадрами), з якого тріангульовано точку
     cv::Point3d position;
     cv::Mat descriptor; // Дескриптор, який описує точку
 
@@ -37,9 +39,9 @@ struct MapPoint3D {
 	int getKeypointIndex(int frameId) const {
 		auto it = observations.find(frameId);
 
-		if (it != observations.end()) 
+		if (it != observations.end())
 			return it->second;
-		
+
 		return -1; // Якщо кадр не спостерігає точку
 	}
 };
@@ -67,5 +69,15 @@ struct PnpTrackingResult {
 struct DensePoint3D {
     cv::Point3d position;
     cv::Vec3b color; // B, G, R
-    int sourceId = -1; // Індекс стерео-пари, з якої отримано точку (для перевірки узгодженості між парами)
+    int sourceId = -1; // Індекс карти глибин, з якої отримано точку
+};
+
+/**
+ * Карта глибин одного кадру, отримана зі стерео-пари (refId, srcId).
+ * depth(y, x) = Z у системі камери refId (0 = немає даних).
+ */
+struct DepthMap {
+    int refId = -1;
+    int srcId = -1;
+    cv::Mat depth; // CV_32F
 };

@@ -4,18 +4,21 @@
 #include <vector>
 #include <unordered_map>
 #include <iostream>
+#include <thread>
 #include <opencv2/core.hpp>
 #include <opencv2/calib3d.hpp>
 #include <ceres/ceres.h>
+#include <ceres/manifold.h>
 
 #include "GlobalMap.hpp"
 #include "Types.hpp"
 #include "ReprojectionErrorCost.hpp"
+#include "GeometryUtils.hpp"
 
 class BundleAdjuster
 {
 private:
-    double m_fx, m_fy, m_cx, m_cy;    
+    double m_fx, m_fy, m_cx, m_cy;
     int maxIterations;
     bool verbose;
 public:
@@ -35,11 +38,18 @@ public:
      * Запускає глобальний Bundle Adjustment для всіх камер і точок у карті
      * @param map              посилання на глобальну карту
      * @param allFramesMap     доступ до 2D ключових точок кадру [frameId -> Frame]
-     * @param fixFirstCamera   чи фіксувати Кадр 0 у початку координат (усуває Gauge Ambiguity)
+     * @param anchorFrameId    кадр, що фіксується повністю (R = I, t = 0)
+     * @param scaleFrameId     другий кадр початкової пари: його |t| фіксується
+     *
+     * Монокулярна реконструкція визначена з точністю до подібності (7 ступенів свободи).
+     * Фіксація лише першої камери прибирає 6 з них, а масштаб лишається вільним — система
+     * вироджена, і Ceres падав з "Unable to perform dense Cholesky factorization".
+     * Тому на translation другої камери накладаємо SphereManifold (|t| = const).
      */
     bool optimize(GlobalMap& map,
                   const std::unordered_map<int, Frame>& allFramesMap,
-                  bool fixFirstCamera = true) {
+                  int anchorFrameId,
+                  int scaleFrameId = -1) {
         ceres::Problem problem;
         ceres::LossFunction* lossFunction = new ceres::HuberLoss(1.0); // Зрізає вплив аутлаєрів > 1 px
 
@@ -54,15 +64,12 @@ public:
             cv::Mat rvec;
             cv::Rodrigues(pose.rotation, rvec);
             rvec.convertTo(rvec, CV_64F);
+            cv::Vec3d t = geom::translation(pose);
 
-            std::vector<double> camData = {
+            cameraParams[frameId] = {
                 rvec.at<double>(0), rvec.at<double>(1), rvec.at<double>(2),
-                pose.translation.at<double>(0),
-                pose.translation.at<double>(1),
-                pose.translation.at<double>(2),
+                t[0], t[1], t[2]
             };
-
-            cameraParams[frameId] = camData;
         }
 
         // отримуємо точки з карти
@@ -75,9 +82,9 @@ public:
         int residualCount = 0;
         for (const auto& [pointId, mapPt] : map.getMapPoints()) {
             for (const auto& [frameId, kpIdx] : mapPt.observations) {
-                if (cameraParams.find(frameId) == cameraParams.end()) 
+                if (cameraParams.find(frameId) == cameraParams.end())
                     continue;
-                if (allFramesMap.find(frameId) == allFramesMap.end()) 
+                if (allFramesMap.find(frameId) == allFramesMap.end())
                     continue;
 
                 const auto& frame = allFramesMap.at(frameId);
@@ -104,33 +111,35 @@ public:
             return false;
         }
 
-        // 3. Усунення невизначеності калібрувальної системи (Gauge Freedom):
-        if (fixFirstCamera && !cameraParams.empty()) {
-            // unordered_map не має порядку, тому begin() — випадкова камера. Фіксуємо саме найперший кадр (R=I, t=0).
-            int anchorFrameId = cameraParams.begin()->first;
-            for (const auto& entry : cameraParams) {
-                anchorFrameId = std::min(anchorFrameId, entry.first);
-            }
-            problem.SetParameterBlockConstant(cameraParams[anchorFrameId].data());
-            problem.SetParameterBlockConstant(cameraParams[anchorFrameId].data() + 3);
+        // Усунення невизначеності калібрувальної системи (Gauge Freedom)
+        auto anchorIt = cameraParams.find(anchorFrameId);
+        if (anchorIt != cameraParams.end() && problem.HasParameterBlock(anchorIt->second.data())) {
+            problem.SetParameterBlockConstant(anchorIt->second.data());
+            problem.SetParameterBlockConstant(anchorIt->second.data() + 3);
+        }
+        auto scaleIt = cameraParams.find(scaleFrameId);
+        if (scaleIt != cameraParams.end() && problem.HasParameterBlock(scaleIt->second.data() + 3)) {
+            problem.SetManifold(scaleIt->second.data() + 3, new ceres::SphereManifold<3>());
         }
 
-        // 4. Налаштування розв'язувача
+        // Налаштування розв'язувача
         ceres::Solver::Options options;
         options.linear_solver_type = ceres::DENSE_SCHUR;
         options.max_num_iterations = maxIterations;
-        options.minimizer_progress_to_stdout = verbose;
-        options.num_threads = 6;
+        options.minimizer_progress_to_stdout = false;
+        options.num_threads = std::max(1u, std::thread::hardware_concurrency());
 
         ceres::Solver::Summary summary;
         ceres::Solve(options, &problem, &summary);
 
-        if(verbose) 
+        if(verbose)
         {
-            std::cout << summary.BriefReport() << std::endl;
+            std::cout << "[BA] " << summary.BriefReport() << std::endl;
         }
 
-        // 5. Запис оптимізованих результатів назад у GlobalMap
+        if (!summary.IsSolutionUsable()) return false;
+
+        // Запис оптимізованих результатів назад у GlobalMap
         for (auto& [frameId, camData] : cameraParams) {
             cv::Mat rvec = (cv::Mat_<double>(3, 1) << camData[0], camData[1], camData[2]);
             cv::Mat tvec = (cv::Mat_<double>(3, 1) << camData[3], camData[4], camData[5]);
@@ -140,12 +149,66 @@ public:
         }
 
         for (auto& [pointId, ptData] : pointParams) {
-            cv::Point3d optPos(ptData[0], ptData[1], ptData[2]);
-
-            const_cast<std::unordered_map<int, MapPoint3D>&>(map.getMapPoints())[pointId].position = optPos;
+            map.setPointPosition(pointId, cv::Point3d(ptData[0], ptData[1], ptData[2]));
         }
 
-        return summary.IsSolutionUsable();
+        return true;
     }
 
+    /**
+     * Видаляє спостереження з похибкою репроєкції > maxErrorPx, а потім точки,
+     * у яких лишилось < 2 спостережень або замалий кут тріангуляції.
+     * @return кількість видалених спостережень
+     */
+    int removeOutliers(GlobalMap& map,
+                       const std::unordered_map<int, Frame>& allFramesMap,
+                       double maxErrorPx,
+                       double minAngleDeg,
+                       double* outRmsError = nullptr) const
+    {
+        cv::Matx33d K(m_fx, 0, m_cx, 0, m_fy, m_cy, 0, 0, 1);
+
+        std::vector<std::pair<int, int>> badObservations;
+        std::vector<int> badPoints;
+        double sqSum = 0.0;
+        size_t count = 0;
+
+        for (const auto& [pointId, mapPt] : map.getMapPoints()) {
+            cv::Vec3d X = geom::toVec(mapPt.position);
+            for (const auto& [frameId, kpIdx] : mapPt.observations) {
+                cv::Point2d uv;
+                double err = 1e9;
+                if (geom::project(K, map.getCameraPose(frameId), X, uv)) {
+                    err = cv::norm(uv - cv::Point2d(allFramesMap.at(frameId).keypoints[kpIdx].pt));
+                    sqSum += err * err;
+                    count++;
+                }
+                if (err > maxErrorPx) badObservations.emplace_back(pointId, frameId);
+            }
+        }
+
+        for (const auto& [pointId, frameId] : badObservations) {
+            map.removeObservation(pointId, frameId);
+        }
+
+        for (const auto& [pointId, mapPt] : map.getMapPoints()) {
+            if (mapPt.observations.size() < 2) { badPoints.push_back(pointId); continue; }
+
+            std::vector<cv::Vec3d> centers;
+            for (const auto& [frameId, kpIdx] : mapPt.observations) {
+                centers.push_back(geom::cameraCenter(map.getCameraPose(frameId)));
+            }
+            double maxAngle = 0.0;
+            cv::Vec3d X = geom::toVec(mapPt.position);
+            for (size_t i = 0; i < centers.size(); ++i)
+                for (size_t j = i + 1; j < centers.size(); ++j)
+                    maxAngle = std::max(maxAngle, geom::rayAngleDeg(X, centers[i], centers[j]));
+            if (maxAngle < minAngleDeg) badPoints.push_back(pointId);
+        }
+
+        for (int pointId : badPoints) map.removePoint(pointId);
+
+        if (outRmsError) *outRmsError = count ? std::sqrt(sqSum / count) : 0.0;
+        return static_cast<int>(badObservations.size());
+    }
 };
