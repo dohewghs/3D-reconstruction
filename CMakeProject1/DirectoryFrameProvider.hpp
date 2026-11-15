@@ -20,8 +20,8 @@ public:
 	~DirectoryFrameProvider() = default;
 
 	virtual bool getNextFrame(cv::Mat& outFrame) override;
-	virtual bool hasNextFrame() const override;
 	virtual void reset() override;
 
+	bool hasNextFrame() const;
 	size_t totalFrames();
 };

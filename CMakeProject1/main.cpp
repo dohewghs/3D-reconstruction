@@ -23,7 +23,7 @@ int main(int argc, char** argv) {
     // Шлях до тестового фото
     std::string directoryPath = (argc > 1) 
         ? argv[1] 
-        : "/Users/yuriishymkiv/studying/coursework/3D-reconstruction/CMakeProject1/data/set3";
+        : "/Users/yuriishymkiv/studying/coursework/3D-reconstruction/CMakeProject1/data/set2";
 
 
     std::cout << "Ініціалізація 3D Reconstruction Pipeline..." << std::endl;
