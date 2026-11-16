@@ -6,7 +6,8 @@
     {
       "name": "opencv4",
       "features": [
-        "contrib"
+        "contrib",
+        "ffmpeg"
       ]
     },
     "eigen3",

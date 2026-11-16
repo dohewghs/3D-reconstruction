@@ -1,9 +1,10 @@
 #include "VideoFrameProvider.hpp"
 #include <opencv2/core/mat.hpp>
 #include <stdexcept>
+#include <iostream>
 
 VideoFrameProvider::VideoFrameProvider(std::string videoFilePath, size_t frameStep)
-    : cap(videoFilePath), frameStep(frameStep) 
+    : cap(videoFilePath), frameStep(frameStep), isFirstFrame(true)
 {
     if (!cap.isOpened())
     {

@@ -26,13 +26,9 @@ add_executable (CMakeProject1
  "BundleAdjuster.hpp"
  "SfMPipeline.hpp"
  "DenseReconstructor.hpp"
-<<<<<<< Updated upstream
-=======
- "PointCloudFilter.hpp"
  "VideoFrameProvider.hpp"
  "VideoFrameProvider.cpp"
  "AsyncVideoFrameProvider.hpp"
->>>>>>> Stashed changes
 )
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
