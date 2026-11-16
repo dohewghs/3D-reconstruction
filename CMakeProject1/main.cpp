@@ -1,10 +1,14 @@
 ﻿#include <iostream>
 #include <memory>
+#include <numeric>
 #include <opencv2/core.hpp>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/highgui.hpp>
 #include <ostream>
 #include <string>
+#include <chrono>
+#include <vector>
+#include <numeric>
 
 #include "DirectoryFrameProvider.hpp"
 #include "LaplacianSharpnessPreprocessorOpenCV.hpp"
@@ -13,6 +17,7 @@
 #include "SfMPipeline.hpp"
 
 #include "VideoFrameProvider.hpp"
+#include "AsyncVideoFrameProvider.hpp"
 
 cv::Mat createDefaultCameraMatrix(double width, double height) {
     double focalLength = 1.2 * std::max(width, height);
@@ -35,7 +40,8 @@ int main(int argc, char** argv) {
 
     // 1. Створення обробників
     //auto provider = std::make_unique<DirectoryFrameProvider>(directoryPath);
-    auto provider = std::make_unique<VideoFrameProvider>(directoryPath);
+    auto provider = std::make_unique<AsyncVideoFrameProvider>(directoryPath, 1, 30);
+    //auto provider = std::make_unique<VideoFrameProvider>(directoryPath);
     auto preprocessor = std::make_unique<LaplacianFramePreprocessorOpenCV>(30.0);
     auto extractor = std::make_unique<AkazeFeatureExtractor>();
     auto matcher = std::make_unique<HammingRatioMatcher>(0.75f);
@@ -55,17 +61,31 @@ int main(int argc, char** argv) {
 
     cv::Mat frame;
     size_t counter = 0;
+
+    std::vector<double> durations;
+    auto start = std::chrono::steady_clock::now();
     while(provider->getNextFrame(frame))
     {
-        std::cout << "Кадр: " << counter++ << std::endl;
+        auto end = std::chrono::steady_clock::now();
+
+        std::chrono::duration<double, std::milli> duration = end - start;
+        double count = duration.count();
+        std::cout << "Кадр: " << counter++ << " | Затрачено часу на прогрузку: " << count << std::endl;
+        durations.push_back(count);
 
         cv::imshow("Кадр", frame);
 
-        char key = static_cast<char>(cv::waitKey(0));
-        if (key == 27) {
-            break;
-        }
+        // char key = static_cast<char>(cv::waitKey(0));
+        // if (key == 27) {
+        //     break;
+        // }
+
+        start = std::chrono::steady_clock::now();
     }
 
+    double acc = std::accumulate(durations.begin() + 1, durations.end(), 0.0);
+    size_t siz = durations.size() - 1;
+    std::cout << "size: " << siz << " acc: " << acc << '\n';
+    std::cout << "Середній час: " << acc/siz << std::endl;
     return 0;
 }
